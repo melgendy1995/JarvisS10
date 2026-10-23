@@ -52,6 +52,7 @@ dependencies {
     implementation(project(":orb"))
     implementation(project(":audio"))
     implementation(project(":provider-gemini"))
+    implementation(project(":provider-groq"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)

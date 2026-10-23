@@ -25,3 +25,24 @@ The app builds and runs with no Firebase project. Time, timers, and the flashlig
 4. Register that debug token in App Check for this phone. Ask again after it is saved.
 
 Play Integrity often rejects a pure sideload. For a release build, upload the same signing cert to an internal testing track and install that build. A release APK must not use the debug provider.
+
+## Groq proxy
+
+The phone never calls `api.groq.com` and never holds a Groq key. A Cloudflare Worker checks a bearer, allows only the three chat models plus `whisper-large-v3-turbo`, and forwards with `GROQ_API_KEY`.
+
+1. Install Wrangler (`npm install -g wrangler`) and log in (`npx wrangler login`).
+2. From `worker/`:
+
+   ```bash
+   npx wrangler secret put GROQ_API_KEY
+   npx wrangler secret put JARVIS_BEARER
+   npx wrangler deploy
+   ```
+
+   `GROQ_API_KEY` is the key from the Groq console. `JARVIS_BEARER` is a long random string you invent. Neither value belongs in git, `wrangler.toml`, or `local.properties`.
+3. Copy the deployed `*.workers.dev` URL into `local.properties` as `GROQ_PROXY_URL` (no trailing path). Rebuild the app. An empty URL leaves Groq as not configured and the chain keeps working.
+4. On the phone, long-press the drifting state word (IDLE, LISTENING, and the rest). Paste the same bearer and save. It is stored in Android Keystore-backed encrypted preferences.
+
+The worker's daily counters (1,200 chat requests, 2,000 Whisper requests) live in the isolate and reset on a cold start. The phone also rotates `openai/gpt-oss-120b`, `qwen/qwen3.8-27b`, and `openai/gpt-oss-20b`, cools only the model that returned 429, and stops each one near 180K tokens in a rolling 24 hours. Replace `JARVIS_BEARER` to revoke a lost phone without shipping a new APK.
+
+Whisper runs only after on-device speech recognition fails, and only when Gemini or Groq can still answer. The transcript still goes through the on-device router first.

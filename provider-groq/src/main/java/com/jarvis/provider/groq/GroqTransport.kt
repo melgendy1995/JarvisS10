@@ -15,7 +15,11 @@ interface GroqTransport {
     suspend fun transcribe(wav: ByteArray): GroqTranscript
 }
 
-fun groqHttpClient(): OkHttpClient {
+fun groqTransport(proxyUrl: () -> String, bearer: () -> String): GroqTransport {
+    return OkHttpGroqTransport(groqHttpClient(), proxyUrl, bearer)
+}
+
+internal fun groqHttpClient(): OkHttpClient {
     return OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(45, TimeUnit.SECONDS)
@@ -30,7 +34,7 @@ fun groqHttpClient(): OkHttpClient {
  * OpenAI-compatible chat and audio calls. [proxyUrl] is the Worker origin.
  * The Authorization value is the Worker bearer, never a Groq key.
  */
-class OkHttpGroqTransport(
+internal class OkHttpGroqTransport(
     private val client: OkHttpClient,
     private val proxyUrl: () -> String,
     private val bearer: () -> String,

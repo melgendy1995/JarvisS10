@@ -10,7 +10,9 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Box
@@ -81,7 +83,7 @@ fun JarvisScreen(viewModel: JarvisViewModel) {
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Spacer(Modifier.weight(1f))
-            StateLabel(ui.orb, ui.accent)
+            StateLabel(ui.orb, ui.accent, onOpenSettings = viewModel::openGroqSettings)
             Spacer(Modifier.height(12.dp))
             Captions(
                 you = ui.you,
@@ -99,11 +101,22 @@ fun JarvisScreen(viewModel: JarvisViewModel) {
                     .height(220.dp),
             )
         }
+        if (ui.groqSettings) {
+            Box(Modifier.fillMaxSize().background(Color.Black)) {
+                GroqSettings(
+                    proxyReady = ui.groqProxyReady,
+                    bearerSaved = ui.groqBearerSaved,
+                    keystoreReady = ui.groqKeystoreReady,
+                    onSave = viewModel::saveGroqBearer,
+                    onClose = viewModel::closeGroqSettings,
+                )
+            }
+        }
     }
 }
 
 @Composable
-private fun StateLabel(phase: OrbState, accent: BrainAccent) {
+private fun StateLabel(phase: OrbState, accent: BrainAccent, onOpenSettings: () -> Unit) {
     val transition = rememberInfiniteTransition(label = "drift")
     val driftX by transition.animateFloat(
         initialValue = -8f,
@@ -126,7 +139,12 @@ private fun StateLabel(phase: OrbState, accent: BrainAccent) {
     val color = Color(accent.red, accent.green, accent.blue)
     Text(
         text = if (phase == OrbState.ERROR) "OFFLINE" else phase.name,
-        modifier = Modifier.offset(x = driftX.dp, y = driftY.dp),
+        modifier = Modifier
+            .offset(x = driftX.dp, y = driftY.dp)
+            .semantics { contentDescription = "Groq settings" }
+            .pointerInput(onOpenSettings) {
+                detectTapGestures(onLongPress = { onOpenSettings() })
+            },
         color = color.copy(alpha = 0.55f),
         fontSize = 13.sp,
         fontWeight = FontWeight.Light,

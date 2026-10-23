@@ -39,6 +39,8 @@ class KeystoreBearerStore(context: Context) {
 
     fun get(): String = prefs?.getString(KEY, "").orEmpty()
 
+    fun isOpen(): Boolean = prefs != null
+
     fun set(token: String): Boolean {
         val editor = prefs?.edit() ?: return false
         editor.putString(KEY, token.trim())

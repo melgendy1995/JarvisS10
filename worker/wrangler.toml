@@ -1,0 +1,11 @@
+name = "jarvis-groq-proxy"
+main = "src/index.js"
+compatibility_date = "2024-11-12"
+
+# No secrets in this file.
+#   npx wrangler secret put GROQ_API_KEY
+#   npx wrangler secret put JARVIS_BEARER
+
+[vars]
+CHAT_DAILY_LIMIT = "1200"
+WHISPER_DAILY_LIMIT = "2000"

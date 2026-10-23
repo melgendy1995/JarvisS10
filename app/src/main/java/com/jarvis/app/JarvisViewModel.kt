@@ -13,11 +13,15 @@ import com.jarvis.audio.PushToTalkRecognizer
 import com.jarvis.audio.SpeechEnvelope
 import com.jarvis.core.brain.BrainRequest
 import com.jarvis.core.brain.BrainResult
+import com.jarvis.core.brain.ConversationTurn
 import com.jarvis.core.brain.LiveEvent
 import com.jarvis.core.brain.LiveFollowUp
+import com.jarvis.core.brain.Speaker
 import com.jarvis.orb.BrainAccent
 import com.jarvis.orb.OrbState
 import com.jarvis.provider.gemini.ModelConfig
+import com.jarvis.provider.groq.BackupSttPolicy
+import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -44,6 +48,10 @@ data class JarvisUiState(
     val you: String = "",
     val reply: String = "",
     val holding: Boolean = false,
+    val groqSettings: Boolean = false,
+    val groqProxyReady: Boolean = false,
+    val groqBearerSaved: Boolean = false,
+    val groqKeystoreReady: Boolean = true,
 )
 
 sealed interface JarvisEvent {
@@ -75,6 +83,13 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private var pendingPermission: String? = null
     private var mic: PcmMic? = null
     private var activeFollowUp: LiveFollowUp? = null
+    private val history = ArrayDeque<ConversationTurn>()
+    private val utteranceMic = PcmMic(ModelConfig.INPUT_SAMPLE_RATE_HZ)
+    private val utterancePcm = ByteArrayOutputStream()
+    private val pcmLock = Any()
+    private var captureOpen = false
+    private var pendingPcm = ByteArray(0)
+    private var sttFailure = ""
 
     @Volatile private var liveActive = false
 
@@ -90,12 +105,12 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             if (!holding) routeHeard()
         },
         onError = { message, hard ->
+            // Soft errors while the finger is down are restarted inside the recognizer
+            // and never reach here. Anything that does is a failed on-device transcript.
             holding = false
-            if (hard) {
-                showProblem(message.ifBlank { "Speech recognition failed." })
-            } else if (!routed) {
-                showIdle(message)
-            }
+            sttFailure = message
+            freezeUtterancePcm()
+            if (!routed) routeHeard(hardFailure = hard)
         },
     )
 
@@ -133,11 +148,14 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         holding = true
         heard = null
         routed = false
+        sttFailure = ""
+        pendingPcm = ByteArray(0)
         waitForResult?.cancel()
         routeJob?.cancel()
         abandonLive()
         speaker.stop()
         drainQueue()
+        startUtteranceCapture()
         _ui.update {
             it.copy(
                 holding = true,
@@ -156,6 +174,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         if (!holding) return
         holding = false
         _ui.update { it.copy(holding = false) }
+        freezeUtterancePcm()
         recognizer.stop()
         if (heard != null) {
             routeHeard()
@@ -166,6 +185,32 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     showIdle("I didn't hear anything.")
                 }
             }
+        }
+    }
+
+    fun openGroqSettings() {
+        _ui.update {
+            it.copy(
+                groqSettings = true,
+                groqProxyReady = app.groqProxyConfigured(),
+                groqBearerSaved = app.groqBearerSaved(),
+                groqKeystoreReady = app.groqKeystoreOpen(),
+            )
+        }
+    }
+
+    fun closeGroqSettings() {
+        _ui.update { it.copy(groqSettings = false) }
+    }
+
+    fun saveGroqBearer(token: String) {
+        val saved = app.saveGroqBearer(token)
+        _ui.update {
+            it.copy(
+                groqSettings = !saved,
+                groqBearerSaved = app.groqBearerSaved(),
+                groqKeystoreReady = app.groqKeystoreOpen(),
+            )
         }
     }
 
@@ -181,15 +226,70 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun routeHeard() {
+    private fun routeHeard(hardFailure: Boolean = false) {
         if (routed) return
         val text = heard?.trim().orEmpty()
-        routed = true
-        waitForResult?.cancel()
         if (text.isEmpty()) {
-            showIdle("I didn't hear anything.")
+            val audio = pendingPcm
+            pendingPcm = ByteArray(0)
+            // Whisper is only the backup recognizer. The router still runs on its text.
+            if (BackupSttPolicy.shouldTranscribe(
+                    recognizerText = text,
+                    recognizerFailed = true,
+                    pcmBytes = audio.size,
+                    cloudNext = app.cloudBrainReachable() && app.whisper.ready(),
+                )
+            ) {
+                routed = true
+                waitForResult?.cancel()
+                transcribe(audio)
+                return
+            }
+            routed = true
+            waitForResult?.cancel()
+            if (hardFailure && sttFailure.isNotBlank()) {
+                showProblem(sttFailure)
+            } else {
+                showIdle(sttFailure.ifBlank { "I didn't hear anything." })
+            }
             return
         }
+        routed = true
+        pendingPcm = ByteArray(0)
+        waitForResult?.cancel()
+        deliver(text)
+    }
+
+    private fun transcribe(audio: ByteArray) {
+        val gen = generation
+        _ui.update {
+            it.copy(
+                orb = OrbState.THINKING,
+                level = 0f,
+                you = "",
+                holding = false,
+                accent = BrainAccent.PHONE,
+                brain = "",
+            )
+        }
+        routeJob = viewModelScope.launch {
+            val text = try {
+                app.whisper.transcribe(audio)?.trim().orEmpty()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                ""
+            }
+            if (!isActive || gen != generation) return@launch
+            if (text.isEmpty()) {
+                showIdle(sttFailure.ifBlank { "I didn't hear anything." })
+                return@launch
+            }
+            deliver(text)
+        }
+    }
+
+    private fun deliver(text: String) {
         val gen = generation
         _ui.update {
             it.copy(
@@ -203,7 +303,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
         routeJob = viewModelScope.launch {
             val result = try {
-                app.chain.reply(BrainRequest(text))
+                app.chain.reply(BrainRequest(utterance = text, turns = history.toList()))
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -217,6 +317,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 (result as? BrainResult.Answer)?.followUp?.close()
                 return@launch
             }
+            rememberUser(text)
+            if (result is BrainResult.Answer) rememberAssistant(result.text)
             present(result, gen)
         }
     }
@@ -347,6 +449,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                         }
                     }
                     LiveEvent.TurnComplete -> {
+                        rememberAssistant(_ui.value.reply)
                         withContext(Dispatchers.IO) { speaker.drain(1_500) }
                         capture.muted = false
                         listening = true
@@ -477,10 +580,62 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private fun startUtteranceCapture() {
+        synchronized(pcmLock) { utterancePcm.reset() }
+        captureOpen = utteranceMic.start { frame, _ ->
+            synchronized(pcmLock) {
+                if (utterancePcm.size() >= MAX_UTTERANCE_BYTES) return@synchronized
+                val room = MAX_UTTERANCE_BYTES - utterancePcm.size()
+                if (frame.size <= room) {
+                    utterancePcm.write(frame)
+                } else {
+                    utterancePcm.write(frame, 0, room)
+                }
+            }
+        }
+    }
+
+    private fun freezeUtterancePcm() {
+        if (!captureOpen) return
+        utteranceMic.stop()
+        captureOpen = false
+        pendingPcm = synchronized(pcmLock) {
+            val bytes = utterancePcm.toByteArray()
+            utterancePcm.reset()
+            bytes
+        }
+    }
+
+    private fun rememberUser(text: String) {
+        val line = text.trim()
+        if (line.isEmpty()) return
+        history.addLast(ConversationTurn(Speaker.USER, line))
+        trimHistory()
+    }
+
+    private fun rememberAssistant(text: String) {
+        val line = text.trim()
+        if (line.isEmpty()) return
+        if (history.lastOrNull()?.text == line) return
+        history.addLast(ConversationTurn(Speaker.ASSISTANT, line))
+        trimHistory()
+    }
+
+    private fun trimHistory() {
+        while (history.size > MAX_HISTORY) history.removeFirst()
+    }
+
     override fun onCleared() {
+        if (captureOpen) utteranceMic.stop()
+        captureOpen = false
         abandonLive()
         recognizer.release()
         speaker.shutdown()
         super.onCleared()
+    }
+
+    private companion object {
+        const val MAX_HISTORY = 12
+        const val MAX_UTTERANCE_BYTES = 60 * 16_000 * 2
     }
 }
