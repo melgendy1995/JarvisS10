@@ -22,16 +22,26 @@ import com.jarvis.core.skills.SkillRegistry
 import java.time.LocalDate
 
 internal object GeminiModels {
-    fun text(registry: SkillRegistry) = firebase().generativeModel(
+    fun text(registry: SkillRegistry, system: String = ModelConfig.SYSTEM_PROMPT) = firebase().generativeModel(
         ModelConfig.TEXT_MODEL,
         null,
         null,
         toolList(registry),
         null,
-        content("system") { text(ModelConfig.SYSTEM_PROMPT) },
+        content("system") { text(system.ifBlank { ModelConfig.SYSTEM_PROMPT }) },
     )
 
-    fun live(registry: SkillRegistry) = firebase().liveModel(
+    /** No tools. Used only to rewrite the on-device summary. */
+    fun plain(system: String) = firebase().generativeModel(
+        ModelConfig.TEXT_MODEL,
+        null,
+        null,
+        emptyList(),
+        null,
+        content("system") { text(system) },
+    )
+
+    fun live(registry: SkillRegistry, system: String = ModelConfig.SYSTEM_PROMPT) = firebase().liveModel(
         ModelConfig.LIVE_MODEL,
         liveGenerationConfig {
             responseModality = ResponseModality.AUDIO
@@ -40,7 +50,7 @@ internal object GeminiModels {
             contextWindowCompression = ContextWindowCompressionConfig()
         },
         toolList(registry),
-        content("system") { text(ModelConfig.SYSTEM_PROMPT) },
+        content("system") { text(system.ifBlank { ModelConfig.SYSTEM_PROMPT }) },
     )
 
     private fun firebase() = Firebase.ai(backend = GenerativeBackend.googleAI())

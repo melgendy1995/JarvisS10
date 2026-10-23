@@ -22,12 +22,23 @@ data class ConversationTurn(
     val text: String,
 )
 
+/** A fact the phone already stored. Providers only see it inside a fitted prompt. */
+data class MemoryFact(
+    val key: String,
+    val value: String,
+    val pinned: Boolean = false,
+)
+
 data class BrainRequest(
     val utterance: String,
     /** Prior lines only. The current utterance is [utterance], not a duplicate last turn. */
     val turns: List<ConversationTurn> = emptyList(),
-    /** Optional "about me" persona. Empty until a profile editor exists. */
+    /** "About me" persona. The editor caps it; [PromptFitter] caps it again. */
     val persona: String = "",
+    /** Pinned facts are kept ahead of the others when the prompt is trimmed. */
+    val facts: List<MemoryFact> = emptyList(),
+    /** Rolling summary of turns that fell out of the recent window. */
+    val summary: String = "",
 )
 
 /**
@@ -89,4 +100,12 @@ interface Brain {
     val id: String
     val accent: BrainAccent
     suspend fun reply(request: BrainRequest): BrainResult
+
+    /**
+     * One-shot text used only to fold on-device memory.
+     * Live audio brains leave this as [BrainError.NotConfigured].
+     */
+    suspend fun summarize(prompt: String): BrainResult {
+        return BrainResult.Failure(id, BrainError.NotConfigured)
+    }
 }

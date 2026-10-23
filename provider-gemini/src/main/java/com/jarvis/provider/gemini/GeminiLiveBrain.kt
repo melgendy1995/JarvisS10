@@ -20,6 +20,7 @@ import com.jarvis.core.brain.BrainRequest
 import com.jarvis.core.brain.BrainResult
 import com.jarvis.core.brain.LiveEvent
 import com.jarvis.core.brain.LiveFollowUp
+import com.jarvis.core.brain.PromptFitter
 import com.jarvis.core.skills.SkillRegistry
 import java.io.ByteArrayOutputStream
 import java.time.Duration
@@ -61,7 +62,15 @@ class GeminiLiveBrain(
             liveCapReached = usage.liveCapReached(),
         )?.let { return it }
         openSession?.close()
-        val session = GeminiLiveSession(scope, registry, time, usage)
+        val system = PromptFitter().memorySystem(
+            baseSystem = ModelConfig.SYSTEM_PROMPT,
+            persona = request.persona,
+            facts = request.facts,
+            summary = request.summary,
+            priorTurns = request.turns,
+            charBudget = PromptFitter.LIVE_CHAR_BUDGET,
+        )
+        val session = GeminiLiveSession(scope, registry, time, usage, system)
         openSession = session
         return try {
             when (val first = session.open(request.utterance)) {
@@ -117,6 +126,7 @@ private class GeminiLiveSession(
     private val registry: SkillRegistry,
     private val time: TimeSource,
     private val usage: UsageCounter,
+    private val system: String,
 ) : LiveFollowUp {
     override val followUpWindow: Duration = Duration.ofMillis(ModelConfig.FOLLOW_UP_WINDOW_MS)
     private val followEvents = Channel<LiveEvent>(Channel.UNLIMITED)
@@ -179,7 +189,7 @@ private class GeminiLiveSession(
     }
 
     private suspend fun drive(utterance: String, first: CompletableDeferred<FirstTurn?>) {
-        val model = GeminiModels.live(registry)
+        val model = GeminiModels.live(registry, system)
         connect(model, utterance, resend = true)
         val audio = ByteArrayOutputStream()
         val transcript = StringBuilder()

@@ -4,6 +4,7 @@ import com.jarvis.core.brain.BrainError
 import com.jarvis.core.brain.BrainRequest
 import com.jarvis.core.brain.BrainResult
 import com.jarvis.core.brain.ConversationTurn
+import com.jarvis.core.brain.MemoryFact
 import com.jarvis.core.brain.PromptFitter
 import com.jarvis.core.brain.Speaker
 import com.jarvis.core.skills.Skill
@@ -140,6 +141,40 @@ class GroqBrainTest {
         assertTrue(logs.single().contains("prompt ~"))
         val tokens = Regex("""prompt ~(\d+) tokens""").find(logs.single())!!.groupValues[1].toInt()
         assertTrue(tokens <= PromptFitter.TOKEN_BUDGET)
+    }
+
+    @Test
+    fun systemMessageCarriesFactsAndSummary() = runBlocking {
+        transport.handler = {
+            GroqChatResult.Ok(AssistantMessage("Noted.", emptyList()), totalTokens = 12)
+        }
+        val result = brain.reply(
+            BrainRequest(
+                utterance = "what next",
+                persona = "Lives in Riyadh.",
+                facts = listOf(MemoryFact("tea", "mint", pinned = true)),
+                summary = "Talked about the trip.",
+            ),
+        ) as BrainResult.Answer
+        assertEquals("Noted.", result.text)
+        val system = transport.chats.single().messages.first()
+        assertEquals("system", system.role)
+        assertTrue(system.content!!.contains("Lives in Riyadh."))
+        assertTrue(system.content.contains("tea: mint"))
+        assertTrue(system.content.contains("Talked about the trip."))
+    }
+
+    @Test
+    fun summarizeAsksForTextWithoutTools() = runBlocking {
+        transport.handler = {
+            GroqChatResult.Ok(AssistantMessage("A short memory.", emptyList()), totalTokens = 9)
+        }
+        val result = brain.summarize("Previous summary: tea.") as BrainResult.Answer
+        assertEquals("A short memory.", result.text)
+        val request = transport.chats.single()
+        assertTrue(request.tools.isEmpty())
+        assertTrue(request.messages.any { it.role == "user" && it.content!!.contains("tea") })
+        assertEquals(9, rotation.tokensUsed(GroqModels.CHAT[0]))
     }
 
     @Test

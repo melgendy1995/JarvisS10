@@ -82,10 +82,66 @@ class GroqBrain(
         return BrainResult.Failure(id, BrainError.Unavailable)
     }
 
+    override suspend fun summarize(prompt: String): BrainResult {
+        if (prompt.isBlank()) return BrainResult.Failure(id, BrainError.Unavailable)
+        if (!configured()) return BrainResult.Failure(id, BrainError.NotConfigured)
+        if (!online()) return BrainResult.Failure(id, BrainError.Unavailable)
+        val models = rotation.models()
+        if (models.isEmpty()) return BrainResult.Failure(id, BrainError.NotConfigured)
+        val fitted = fitter.fit(SUMMARY_SYSTEM, emptyList(), prompt)
+        val start = rotation.peekIndex()
+        var limited = false
+        for (offset in models.indices) {
+            val index = (start + offset) % models.size
+            val model = models[index]
+            if (!rotation.isAvailable(model)) continue
+            val messages = ArrayList<OutgoingMessage>()
+            if (fitted.system.isNotEmpty()) {
+                messages += OutgoingMessage(role = "system", content = fitted.system)
+            }
+            val user = fitted.turns.lastOrNull()?.text?.takeIf { it.isNotBlank() } ?: prompt.trim()
+            messages += OutgoingMessage(role = "user", content = user)
+            val result = try {
+                transport.complete(GroqChatRequest(model, messages.toList(), emptyList()))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                return BrainResult.Failure(id, BrainError.Unavailable)
+            }
+            when (result) {
+                is GroqChatResult.Ok -> {
+                    val text = result.message.content?.trim().orEmpty()
+                    if (text.isEmpty()) return BrainResult.Failure(id, BrainError.Unavailable)
+                    val spent = result.totalTokens ?: fitted.estimatedTokens.coerceAtLeast(1)
+                    rotation.recordTokens(model, spent)
+                    return BrainResult.Answer(brainId = id, accent = accent, text = text)
+                }
+                is GroqChatResult.Limited -> {
+                    limited = true
+                    rotation.coolUntil(model, cooldownUntil(Turn.Limited(result.retryAfter, result.daily)))
+                }
+                GroqChatResult.NotConfigured -> return BrainResult.Failure(id, BrainError.NotConfigured)
+                GroqChatResult.Unavailable -> return BrainResult.Failure(id, BrainError.Unavailable)
+            }
+        }
+        if (limited || !rotation.hasAvailableModel()) {
+            val wait = rotation.soonestWait()
+            return BrainResult.Failure(
+                id,
+                BrainError.RateLimited(wait, isDaily = wait >= Duration.ofHours(1)),
+            )
+        }
+        return BrainResult.Failure(id, BrainError.Unavailable)
+    }
+
     private fun systemFor(request: BrainRequest): String {
-        val persona = request.persona.trim()
-        if (persona.isEmpty()) return systemPrompt
-        return systemPrompt + "\n\n" + persona
+        return fitter.memorySystem(
+            baseSystem = systemPrompt,
+            persona = request.persona,
+            facts = request.facts,
+            summary = request.summary,
+            charBudget = PromptFitter.GROQ_SYSTEM_CHARS,
+        )
     }
 
     private fun cooldownUntil(limited: Turn.Limited): Instant {
@@ -202,5 +258,8 @@ class GroqBrain(
     companion object {
         const val ID = "groq"
         private const val MAX_TOOL_ROUNDS = 4
+        private const val SUMMARY_SYSTEM =
+            "Summarize the conversation memory in a few short sentences. " +
+                "Reply with the summary only. Do not call tools."
     }
 }
