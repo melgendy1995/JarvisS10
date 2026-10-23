@@ -119,6 +119,13 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             freezeUtterancePcm()
             if (!routed) routeHeard(hardFailure = hard)
         },
+        onFallbackCapture = {
+            // SpeechRecognizer.isRecognitionAvailable was false, or the service never
+            // connected. Record the rest of the hold for Whisper. Do not open this
+            // capture while the recognizer is listening: a second recorder silences
+            // com.google.android.tts on this phone, so the recognizer hears nothing.
+            if (holding && !captureOpen) startUtteranceCapture()
+        },
     )
 
     init {
@@ -162,7 +169,6 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         abandonLive()
         speaker.stop()
         drainQueue()
-        startUtteranceCapture()
         _ui.update {
             it.copy(
                 holding = true,
@@ -620,7 +626,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun startUtteranceCapture() {
         synchronized(pcmLock) { utterancePcm.reset() }
-        captureOpen = utteranceMic.start { frame, _ ->
+        captureOpen = utteranceMic.start { frame, level ->
+            if (holding) _ui.update { it.copy(level = level) }
             synchronized(pcmLock) {
                 if (utterancePcm.size() >= MAX_UTTERANCE_BYTES) return@synchronized
                 val room = MAX_UTTERANCE_BYTES - utterancePcm.size()

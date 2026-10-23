@@ -1,19 +1,27 @@
 package com.jarvis.audio
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.speech.RecognitionListener
+import android.speech.RecognitionService
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import java.util.Locale
 
 /**
- * Hold-to-talk wrapper around [SpeechRecognizer]. [RecognizerIntent.EXTRA_PREFER_OFFLINE] asks
- * for the on-device recognizer when the device has one. Package visibility for
- * RecognitionService is declared by the app manifest.
+ * Hold-to-talk around [SpeechRecognizer].
+ *
+ * Every create, start, stop, and destroy runs on the main looper. The recognizer is
+ * destroyed with [SpeechRecognizer.destroy] only — calling [SpeechRecognizer.cancel]
+ * first posts a message that then runs after the service is cleared and logs
+ * "not connected to the recognition service". A new listen is never started on an
+ * instance that has been destroyed. When no recognition service is visible, the
+ * caller records the hold and sends it to Whisper.
  */
 class PushToTalkRecognizer(context: Context) {
     private val appContext = context.applicationContext
@@ -21,6 +29,11 @@ class PushToTalkRecognizer(context: Context) {
     private var recognizer: SpeechRecognizer? = null
     private var callbacks: Callbacks? = null
     private var session = 0
+    private var ready = false
+    private var finished = false
+    private var unavailable = false
+    private var clientRetries = 0
+    private var beginning = false
     var holding: Boolean = false
         private set
 
@@ -29,12 +42,16 @@ class PushToTalkRecognizer(context: Context) {
         val onPartial: (String) -> Unit,
         val onFinal: (String) -> Unit,
         val onError: (message: String, hard: Boolean) -> Unit,
+        val onFallbackCapture: () -> Unit = {},
     )
 
     fun start(callbacks: Callbacks) {
         main.post {
             this.callbacks = callbacks
             holding = true
+            finished = false
+            unavailable = false
+            clientRetries = 0
             begin()
         }
     }
@@ -42,12 +59,18 @@ class PushToTalkRecognizer(context: Context) {
     fun stop() {
         main.post {
             holding = false
+            if (unavailable) {
+                unavailable = false
+                deliverError("Speech recognition is not available on this phone.", hard = false)
+                return@post
+            }
             val current = recognizer
             if (current == null) {
-                callbacks?.onFinal("")
-            } else {
-                runCatching { current.stopListening() }
+                deliverFinal("")
+                return@post
             }
+            // Queued until the service connects. Do not cancel or destroy here.
+            runCatching { current.stopListening() }
         }
     }
 
@@ -55,51 +78,115 @@ class PushToTalkRecognizer(context: Context) {
         main.post {
             holding = false
             callbacks = null
-            retire()
+            finished = true
+            unavailable = false
+            destroyRecognizer()
         }
     }
 
     private fun begin() {
-        retire()
-        if (!holding) return
-        if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
-            callbacks?.onError("Speech recognition is not available on this phone.", true)
-            return
+        if (beginning) return
+        beginning = true
+        try {
+            destroyRecognizer()
+            if (!holding || finished) return
+            if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
+                beginFallback()
+                return
+            }
+            val target = pickRecognitionTarget(visibleTargets(), selectedTarget())
+            val created = runCatching {
+                if (target != null) {
+                    SpeechRecognizer.createSpeechRecognizer(
+                        appContext,
+                        ComponentName(target.packageName, target.className),
+                    )
+                } else {
+                    SpeechRecognizer.createSpeechRecognizer(appContext)
+                }
+            }.getOrNull()
+            if (created == null) {
+                beginFallback()
+                return
+            }
+            val generation = session
+            ready = false
+            recognizer = created
+            created.setRecognitionListener(listener(generation))
+            if (recognizer !== created || generation != session || !holding) {
+                destroyRecognizer()
+                return
+            }
+            val started = runCatching { created.startListening(listenIntent()) }.isSuccess
+            if (!started || recognizer !== created) {
+                destroyRecognizer()
+                beginFallback()
+            }
+        } finally {
+            beginning = false
         }
-        val generation = session
-        val created = runCatching { SpeechRecognizer.createSpeechRecognizer(appContext) }.getOrNull()
-        if (created == null) {
-            callbacks?.onError("Speech recognition is not available on this phone.", true)
-            return
+    }
+
+    private fun beginFallback() {
+        unavailable = true
+        callbacks?.onFallbackCapture()
+    }
+
+    private fun destroyRecognizer() {
+        val current = recognizer
+        recognizer = null
+        ready = false
+        session++
+        if (current != null) {
+            runCatching { current.destroy() }
         }
-        recognizer = created
-        created.setRecognitionListener(listener(generation))
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+    }
+
+    private fun deliverFinal(text: String) {
+        if (finished) return
+        finished = true
+        callbacks?.onFinal(text)
+    }
+
+    private fun deliverError(message: String, hard: Boolean) {
+        if (finished) return
+        finished = true
+        callbacks?.onError(message, hard)
+    }
+
+    private fun listenIntent(): Intent {
+        return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
         }
-        val started = runCatching { created.startListening(intent) }.isSuccess
-        if (!started) {
-            callbacks?.onError("Speech recognition is not available on this phone.", true)
-            retire()
+    }
+
+    private fun visibleTargets(): List<RecognitionTarget> {
+        val intent = Intent(RecognitionService.SERVICE_INTERFACE)
+        return appContext.packageManager.queryIntentServices(intent, 0).mapNotNull { info ->
+            val service = info.serviceInfo ?: return@mapNotNull null
+            RecognitionTarget(service.packageName, service.name)
         }
     }
 
-    private fun retire() {
-        val current = recognizer
-        recognizer = null
-        session++
-        if (current != null) {
-            runCatching { current.cancel() }
-            runCatching { current.destroy() }
-        }
+    private fun selectedTarget(): RecognitionTarget? {
+        val flat = Settings.Secure.getString(
+            appContext.contentResolver,
+            "voice_recognition_service",
+        ) ?: return null
+        val component = ComponentName.unflattenFromString(flat) ?: return null
+        return RecognitionTarget(component.packageName, component.className)
     }
 
     private fun listener(generation: Int): RecognitionListener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) = Unit
+        override fun onReadyForSpeech(params: Bundle?) {
+            if (generation != session) return
+            ready = true
+        }
+
         override fun onBeginningOfSpeech() = Unit
         override fun onEndOfSpeech() = Unit
         override fun onBufferReceived(buffer: ByteArray?) = Unit
@@ -121,25 +208,38 @@ class PushToTalkRecognizer(context: Context) {
             if (generation != session) return
             val text = results.bestHypothesis()
             main.post {
-                if (generation != session) return@post
-                callbacks?.onFinal(text)
-                retire()
+                if (generation != session || finished) return@post
+                deliverFinal(text)
+                destroyRecognizer()
             }
         }
 
         override fun onError(error: Int) {
             if (generation != session) return
             main.post {
-                if (generation != session) return@post
-                val soft = error == SpeechRecognizer.ERROR_NO_MATCH ||
-                    error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
-                if (holding && soft) {
+                if (generation != session || finished) return@post
+                if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                    deliverError(errorMessage(error), hard = true)
+                    destroyRecognizer()
+                    return@post
+                }
+                if (holding && isSoft(error)) {
                     begin()
                     return@post
                 }
-                val hard = !soft && error != SpeechRecognizer.ERROR_CLIENT
-                callbacks?.onError(errorMessage(error), hard)
-                retire()
+                if (holding && !ready && isRetryable(error) && clientRetries < 1) {
+                    clientRetries++
+                    begin()
+                    return@post
+                }
+                if (holding && !ready) {
+                    destroyRecognizer()
+                    beginFallback()
+                    return@post
+                }
+                val hard = !isSoft(error) && error != SpeechRecognizer.ERROR_CLIENT
+                deliverError(errorMessage(error), hard)
+                destroyRecognizer()
             }
         }
     }
@@ -152,8 +252,21 @@ class PushToTalkRecognizer(context: Context) {
             "On-device recognition is unavailable right now."
         SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "The recognizer is busy."
         SpeechRecognizer.ERROR_SERVER -> "Speech recognition failed."
+        SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> "Speech recognition is not available on this phone."
         SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> ""
-        else -> "I didn't catch that."
+        else -> if (code <= 0) "" else "I didn't catch that."
+    }
+
+    private fun isSoft(error: Int): Boolean {
+        return error == SpeechRecognizer.ERROR_NO_MATCH ||
+            error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
+            error <= 0
+    }
+
+    private fun isRetryable(error: Int): Boolean {
+        return error == SpeechRecognizer.ERROR_CLIENT ||
+            error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ||
+            error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED
     }
 }
 
