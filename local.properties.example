@@ -1,0 +1,8 @@
+## Copy to local.properties. Never commit real keys.
+sdk.dir=/path/to/Android/sdk
+
+## Left empty on purpose. Phase 1 does not read these.
+## Gemini runs through Firebase later, not through a key in the APK.
+GEMINI_API_KEY=
+## Cloudflare worker (or similar) that holds the Groq key. The phone stores only a bearer in the Keystore.
+GROQ_PROXY_URL=
