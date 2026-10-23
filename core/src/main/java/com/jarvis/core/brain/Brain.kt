@@ -11,8 +11,23 @@ enum class BrainAccent(val label: String) {
     OFFLINE("Offline"),
 }
 
+enum class Speaker {
+    USER,
+    ASSISTANT,
+}
+
+/** One remembered line. The local list is what a later brain continues from. */
+data class ConversationTurn(
+    val speaker: Speaker,
+    val text: String,
+)
+
 data class BrainRequest(
     val utterance: String,
+    /** Prior lines only. The current utterance is [utterance], not a duplicate last turn. */
+    val turns: List<ConversationTurn> = emptyList(),
+    /** Optional "about me" persona. Empty until a profile editor exists. */
+    val persona: String = "",
 )
 
 /**

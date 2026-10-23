@@ -4,8 +4,10 @@ import com.jarvis.core.CommandRouter
 import kotlinx.coroutines.CancellationException
 
 /**
- * On-device router first, then each [brains] entry in order.
- * Gemini Live, Gemini text, and later Groq or the local model are just more brains.
+ * On-device router, then each [brains] entry in order:
+ * Gemini Live, Gemini text, Groq, then the offline reply.
+ * The same [BrainRequest] is passed along, so a later brain still has [BrainRequest.turns]
+ * when Gemini fails or is capped.
  * [BrainError.RateLimited], [BrainError.Unavailable], and [BrainError.NotConfigured] fall through.
  */
 class BrainChain(
@@ -43,9 +45,9 @@ class BrainChain(
     private fun exhausted(last: BrainError): BrainResult.Failure {
         val text = when (last) {
             is BrainError.RateLimited ->
-                "Gemini is cooling down. I can still tell the time, set a timer, or toggle the flashlight."
+                "The cloud brains are cooling down. I can still tell the time, set a timer, or toggle the flashlight."
             BrainError.NotConfigured ->
-                "Gemini isn't set up yet. I can still tell the time, set a timer, or toggle the flashlight."
+                "A cloud brain isn't set up yet. I can still tell the time, set a timer, or toggle the flashlight."
             BrainError.Unavailable ->
                 "I can't reach a cloud brain right now. I can still tell the time, set a timer, or toggle the flashlight."
         }

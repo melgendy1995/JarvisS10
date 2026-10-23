@@ -116,6 +116,34 @@ class BrainChainTest {
     }
 
     @Test
+    fun geminiFailureHandsTheSameTurnsToTheNextBrain() = runBlocking {
+        val live = fake("gemini-live") {
+            BrainResult.Failure(
+                "gemini-live",
+                BrainError.RateLimited(Duration.ofHours(4), isDaily = true),
+            )
+        }
+        val text = fake("gemini-text") {
+            BrainResult.Failure("gemini-text", BrainError.Unavailable)
+        }
+        val groq = fake("groq") { request ->
+            BrainResult.Answer("groq", BrainAccent.GROQ, "Continuing: ${request.turns.size}")
+        }
+        val request = BrainRequest(
+            utterance = "and the other one?",
+            turns = listOf(
+                ConversationTurn(Speaker.USER, "tell me a joke"),
+                ConversationTurn(Speaker.ASSISTANT, "A short joke."),
+            ),
+            persona = "Likes short answers.",
+        )
+        val result = BrainChain(router, listOf(live, text, groq)).reply(request) as BrainResult.Answer
+        assertEquals("Continuing: 2", result.text)
+        assertEquals(BrainAccent.GROQ, result.accent)
+        assertEquals(request, groq.lastRequest)
+    }
+
+    @Test
     fun dailyRateLimitIsTheMessageWhenItIsTheLastError() = runBlocking {
         val live = fake("gemini-live") {
             BrainResult.Failure(
@@ -140,8 +168,10 @@ class BrainChainTest {
     ) : Brain {
         override val accent = BrainAccent.GEMINI
         var calls = 0
+        var lastRequest: BrainRequest? = null
         override suspend fun reply(request: BrainRequest): BrainResult {
             calls++
+            lastRequest = request
             return handler(request)
         }
     }
