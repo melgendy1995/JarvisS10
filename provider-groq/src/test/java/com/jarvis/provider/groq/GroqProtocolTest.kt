@@ -137,6 +137,13 @@ class GroqProtocolTest {
     }
 
     @Test
+    fun pastedBearerDropsTheHeaderPrefix() {
+        assertEquals("abc", normalizeBearer("  Bearer abc\n"))
+        assertEquals("abc", normalizeBearer("bearer abc"))
+        assertEquals("abc", normalizeBearer("\uFEFFabc"))
+    }
+
+    @Test
     fun directGroqHostIsNeverCalled() {
         val transport = OkHttpGroqTransport(
             client = OkHttpClient(),

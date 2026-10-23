@@ -99,7 +99,7 @@ internal fun Throwable.toBrainFailure(
     if (QuotaSignals.isNotConfigured(this)) {
         return BrainResult.Failure(id, BrainError.NotConfigured)
     }
-    Log.w(TAG, "Gemini call failed: ${javaClass.simpleName}")
+    Log.w(TAG, "Gemini call failed: ${javaClass.simpleName}", this)
     return BrainResult.Failure(id, BrainError.Unavailable)
 }
 
@@ -193,7 +193,7 @@ object GeminiFirebase {
             ready = true
             true
         } catch (error: Throwable) {
-            Log.w(TAG, "Firebase is not configured: ${error.javaClass.simpleName}")
+            Log.w(TAG, "Firebase is not configured", error)
             false
         }
     }

@@ -138,8 +138,8 @@ class GroqBrainTest {
         assertEquals("tell me a joke", sent[1].content)
         assertEquals("A short joke.", sent[2].content)
         assertEquals("and the other one?", sent[3].content)
-        assertTrue(logs.single().contains("prompt ~"))
-        val tokens = Regex("""prompt ~(\d+) tokens""").find(logs.single())!!.groupValues[1].toInt()
+        val prompt = logs.single { it.contains("prompt ~") }
+        val tokens = Regex("""prompt ~(\d+) tokens""").find(prompt)!!.groupValues[1].toInt()
         assertTrue(tokens <= PromptFitter.TOKEN_BUDGET)
     }
 

@@ -2,6 +2,8 @@ package com.jarvis.core.brain
 
 import com.jarvis.core.CommandRouter
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 
 /**
  * On-device router, then each [brains] entry in order:
@@ -30,7 +32,11 @@ class BrainChain(
             val result = try {
                 brain.reply(request)
             } catch (cancelled: CancellationException) {
-                throw cancelled
+                // A live socket actor completes by cancelling its channel. That throws
+                // CancellationException while this caller is still active, and it must not
+                // skip the rest of the chain. A real parent cancel still propagates.
+                if (!currentCoroutineContext().isActive) throw cancelled
+                BrainResult.Failure(brain.id, BrainError.Unavailable)
             } catch (_: Throwable) {
                 BrainResult.Failure(brain.id, BrainError.Unavailable)
             }

@@ -1,6 +1,10 @@
 package com.jarvis.provider.groq
 
+import android.util.Log
 import java.util.concurrent.TimeUnit
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -76,6 +80,16 @@ internal class OkHttpGroqTransport(
         }
     }
 
+    private fun safeReason(body: String): String {
+        val root = runCatching {
+            kotlinx.serialization.json.Json.parseToJsonElement(body)
+        }.getOrNull() as? JsonObject ?: return ""
+        val reason = (root["error"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+        if (reason.length !in 1..48 || reason.any { it.isISOControl() }) return ""
+        if (reason.contains("gsk_", ignoreCase = true) || reason.contains("bearer ", ignoreCase = true)) return ""
+        return reason
+    }
+
     private fun endpoint(path: String): String? {
         val base = GroqProxy.normalize(proxyUrl()) ?: return null
         return base + path
@@ -90,17 +104,22 @@ internal class OkHttpGroqTransport(
             withContext(Dispatchers.IO) {
                 client.newCall(request).execute().use { response ->
                     val body = response.body?.string().orEmpty()
+                    val reason = safeReason(body)
+                    val reasonLog = if (reason.isEmpty()) "" else " reason=$reason"
+                    Log.i(TAG, "http path=${request.url.encodedPath} status=${response.code}$reasonLog")
                     parse(response.code, response.header("Retry-After"), body)
                 }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (_: Throwable) {
+        } catch (error: Throwable) {
+            Log.w(TAG, "http failed path=${request.url.encodedPath} error=${error.javaClass.simpleName}")
             failure
         }
     }
 
     private companion object {
+        const val TAG = "JarvisGroq"
         val JSON = "application/json; charset=utf-8".toMediaType()
         val WAV = "audio/wav".toMediaType()
     }

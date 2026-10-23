@@ -24,6 +24,8 @@ import com.jarvis.provider.gemini.SharedPrefsCooldownStore
 import com.jarvis.provider.gemini.SharedPrefsUsageStore
 import com.jarvis.provider.gemini.SystemTimeSource
 import com.jarvis.provider.gemini.UsageCounter
+import com.jarvis.app.debug.GeminiDebug
+import com.jarvis.app.debug.registerDebugAsk
 import com.jarvis.provider.groq.BuildConfig as GroqBuildConfig
 import com.jarvis.provider.groq.GroqBrain
 import com.jarvis.provider.groq.GroqProxy
@@ -101,7 +103,8 @@ class JarvisApplication : Application() {
             transport = transport,
             log = groqLog,
         )
-        val configured = { firebaseReady || GeminiFirebase.isReady() }
+        registerDebugAsk(this)
+        val configured = { GeminiDebug.enabled && (firebaseReady || GeminiFirebase.isReady()) }
         geminiText = GeminiTextBrain(
             configured = configured,
             online = network::isOnline,
@@ -123,6 +126,10 @@ class JarvisApplication : Application() {
                 geminiText,
                 groqBrain,
             ),
+        )
+        Log.i(
+            "JarvisGroq",
+            "ready proxy=${groqProxyConfigured()} bearer=${bearerStore.get().isNotBlank()} keystore=${bearerStore.isOpen()}",
         )
     }
 

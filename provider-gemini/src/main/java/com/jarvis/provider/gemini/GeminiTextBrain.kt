@@ -10,7 +10,11 @@ import com.jarvis.core.brain.BrainResult
 import com.jarvis.core.brain.PromptFitter
 import com.jarvis.core.brain.Speaker
 import com.jarvis.core.skills.SkillRegistry
+import android.util.Log
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeoutOrNull
 
 class GeminiTextBrain(
     private val configured: () -> Boolean,
@@ -24,11 +28,12 @@ class GeminiTextBrain(
     override val accent: BrainAccent = BrainAccent.GEMINI
 
     override suspend fun reply(request: BrainRequest): BrainResult {
-        gate(id, configured, online, cooldown, time)?.let { return it }
         return try {
+            gate(id, configured, online, cooldown, time)?.let { return it }
+            Log.i(TAG, "text begin")
             usage.recordTextRequest()
-            val spoken = complete(request)
-            if (spoken.text.isBlank()) {
+            val spoken = withTimeoutOrNull(TEXT_TIMEOUT_MS) { complete(request) }
+            if (spoken == null || spoken.text.isBlank()) {
                 BrainResult.Failure(id, BrainError.Unavailable)
             } else {
                 BrainResult.Answer(
@@ -39,7 +44,8 @@ class GeminiTextBrain(
                 )
             }
         } catch (cancelled: CancellationException) {
-            throw cancelled
+            if (!currentCoroutineContext().isActive) throw cancelled
+            cancelled.toBrainFailure(id, cooldown, time)
         } catch (error: Throwable) {
             error.toBrainFailure(id, cooldown, time)
         }
@@ -47,8 +53,8 @@ class GeminiTextBrain(
 
     override suspend fun summarize(prompt: String): BrainResult {
         if (prompt.isBlank()) return BrainResult.Failure(id, BrainError.Unavailable)
-        gate(id, configured, online, cooldown, time)?.let { return it }
         return try {
+            gate(id, configured, online, cooldown, time)?.let { return it }
             usage.recordTextRequest()
             val model = GeminiModels.plain(SUMMARY_SYSTEM)
             val response = model.generateContent(listOf(content("user") { text(prompt) }))
@@ -112,6 +118,7 @@ class GeminiTextBrain(
 
     companion object {
         const val ID = "gemini-text"
+        private const val TEXT_TIMEOUT_MS = 30_000L
         private const val MAX_TOOL_ROUNDS = 4
         private const val SUMMARY_SYSTEM =
             "Summarize the conversation memory in a few short sentences. " +

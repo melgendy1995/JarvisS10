@@ -41,22 +41,80 @@ class GroqBrain(
     fun hasCapacity(): Boolean = configured() && rotation.hasAvailableModel()
 
     override suspend fun reply(request: BrainRequest): BrainResult {
-        if (!configured()) return BrainResult.Failure(id, BrainError.NotConfigured)
-        if (!online()) return BrainResult.Failure(id, BrainError.Unavailable)
+        val proxyReady = GroqProxy.normalize(proxyUrl()) != null
+        val bearerReady = bearerPresent()
+        val onlineNow = try {
+            online()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            log("online check failed: ${error.javaClass.simpleName}")
+            false
+        }
+        log("reply proxy=$proxyReady bearer=$bearerReady online=$onlineNow")
+        if (!proxyReady || !bearerReady) {
+            log("skip not configured")
+            return BrainResult.Failure(id, BrainError.NotConfigured)
+        }
+        if (!onlineNow) {
+            log("skip offline")
+            return BrainResult.Failure(id, BrainError.Unavailable)
+        }
+        return try {
+            replyOnline(request)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            log("reply failed: ${error.javaClass.simpleName}")
+            BrainResult.Failure(id, BrainError.Unavailable)
+        }
+    }
+
+    private fun bearerPresent(): Boolean {
+        val token = try {
+            bearer().trim()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            log("bearer read failed: ${error.javaClass.simpleName}")
+            return false
+        }
+        if (token.isEmpty()) return false
+        log(authNote(token))
+        return true
+    }
+
+    private fun authNote(token: String): String {
+        val kind = when {
+            UUID.matches(token) -> "uuid"
+            token.startsWith("gsk_") -> "gsk"
+            else -> "other"
+        }
+        return "auth len=${token.length} kind=$kind"
+    }
+
+    private suspend fun replyOnline(request: BrainRequest): BrainResult {
         val models = rotation.models()
-        if (models.isEmpty()) return BrainResult.Failure(id, BrainError.NotConfigured)
+        if (models.isEmpty()) {
+            log("skip no models")
+            return BrainResult.Failure(id, BrainError.NotConfigured)
+        }
         val start = rotation.peekIndex()
         var limited = false
         for (offset in models.indices) {
             val index = (start + offset) % models.size
             val model = models[index]
-            if (!rotation.isAvailable(model)) continue
+            if (!rotation.isAvailable(model)) {
+                log("model cooling model=$model")
+                continue
+            }
             val fitted = fitter.fit(systemFor(request), request.turns, request.utterance)
             log("prompt ~${fitted.estimatedTokens} tokens model=$model")
             when (val outcome = complete(model, request.utterance, fitted)) {
                 is Turn.Spoken -> {
                     rotation.recordTokens(model, outcome.tokens)
                     rotation.commitIndex((index + 1) % models.size)
+                    log("answer model=$model")
                     return BrainResult.Answer(
                         brainId = id,
                         accent = accent,
@@ -66,19 +124,28 @@ class GroqBrain(
                 }
                 is Turn.Limited -> {
                     limited = true
+                    log("limited model=$model daily=${outcome.daily}")
                     rotation.coolUntil(model, cooldownUntil(outcome))
                 }
-                Turn.NotConfigured -> return BrainResult.Failure(id, BrainError.NotConfigured)
-                Turn.Unavailable -> return BrainResult.Failure(id, BrainError.Unavailable)
+                Turn.NotConfigured -> {
+                    log("not configured model=$model")
+                    return BrainResult.Failure(id, BrainError.NotConfigured)
+                }
+                Turn.Unavailable -> {
+                    log("unavailable model=$model")
+                    return BrainResult.Failure(id, BrainError.Unavailable)
+                }
             }
         }
         if (limited || !rotation.hasAvailableModel()) {
             val wait = rotation.soonestWait()
+            log("cooling waitSec=${wait.seconds}")
             return BrainResult.Failure(
                 id,
                 BrainError.RateLimited(wait, isDaily = wait >= Duration.ofHours(1)),
             )
         }
+        log("unavailable after models")
         return BrainResult.Failure(id, BrainError.Unavailable)
     }
 
@@ -257,6 +324,9 @@ class GroqBrain(
 
     companion object {
         const val ID = "groq"
+        private val UUID = Regex(
+            "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        )
         private const val MAX_TOOL_ROUNDS = 4
         private const val SUMMARY_SYSTEM =
             "Summarize the conversation memory in a few short sentences. " +

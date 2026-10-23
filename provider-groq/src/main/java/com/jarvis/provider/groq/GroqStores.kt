@@ -37,13 +37,21 @@ class SharedPrefsGroqStore(context: Context) : GroqStateStore {
 class KeystoreBearerStore(context: Context) {
     private val prefs: SharedPreferences? = open(context.applicationContext)
 
-    fun get(): String = prefs?.getString(KEY, "").orEmpty()
+    fun get(): String {
+        val stored = prefs ?: return ""
+        return try {
+            normalizeBearer(stored.getString(KEY, "").orEmpty())
+        } catch (error: Throwable) {
+            Log.w(TAG, "bearer read failed", error)
+            ""
+        }
+    }
 
     fun isOpen(): Boolean = prefs != null
 
     fun set(token: String): Boolean {
         val editor = prefs?.edit() ?: return false
-        editor.putString(KEY, token.trim())
+        editor.putString(KEY, normalizeBearer(token))
         return editor.commit()
     }
 
@@ -70,6 +78,16 @@ class KeystoreBearerStore(context: Context) {
         const val FILE = "jarvis_groq_bearer"
         const val KEY = "bearer"
     }
+}
+
+/** Trims a pasted worker bearer. A leading "Bearer " is the header, not part of the secret. */
+internal fun normalizeBearer(raw: String): String {
+    var token = raw.trim().removePrefix("\uFEFF").trim()
+    val prefix = "bearer "
+    if (token.length >= prefix.length && token.regionMatches(0, prefix, 0, prefix.length, ignoreCase = true)) {
+        token = token.substring(prefix.length).trim()
+    }
+    return token.replace("\r", "").replace("\n", "")
 }
 
 internal fun encodeSnapshot(snapshot: GroqSnapshot): String {

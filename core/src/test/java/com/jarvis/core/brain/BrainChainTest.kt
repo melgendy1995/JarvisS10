@@ -91,6 +91,17 @@ class BrainChainTest {
     }
 
     @Test
+    fun childCancellationWhileCallerIsActiveFallsThrough() = runBlocking {
+        val live = fake("gemini-live") { throw kotlinx.coroutines.CancellationException("channel") }
+        val text = fake("gemini-text") {
+            BrainResult.Answer("gemini-text", BrainAccent.GEMINI, "Recovered.")
+        }
+        val result = BrainChain(router, listOf(live, text)).reply(BrainRequest("tell me a joke"))
+        assertEquals("Recovered.", (result as BrainResult.Answer).text)
+        assertEquals(1, text.calls)
+    }
+
+    @Test
     fun thrownBrainBecomesUnavailableAndTheNextRuns() = runBlocking {
         val live = fake("gemini-live") { throw IllegalStateException("socket") }
         val text = fake("gemini-text") {

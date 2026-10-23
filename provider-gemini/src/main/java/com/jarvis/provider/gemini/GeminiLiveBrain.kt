@@ -34,6 +34,8 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeoutOrNull
 import android.util.Log
 import kotlinx.coroutines.CancellationException
@@ -53,6 +55,20 @@ class GeminiLiveBrain(
     @Volatile private var openSession: GeminiLiveSession? = null
 
     override suspend fun reply(request: BrainRequest): BrainResult {
+        return try {
+            replyGated(request)
+        } catch (cancelled: CancellationException) {
+            if (!currentCoroutineContext().isActive) throw cancelled
+            openSession?.close()
+            Log.w(TAG, "Gemini call failed: ${cancelled.javaClass.simpleName}", cancelled)
+            BrainResult.Failure(id, BrainError.Unavailable)
+        } catch (error: Throwable) {
+            openSession?.close()
+            error.toBrainFailure(id, cooldown, time)
+        }
+    }
+
+    private suspend fun replyGated(request: BrainRequest): BrainResult {
         gate(
             id = id,
             configured = configured,
@@ -61,6 +77,7 @@ class GeminiLiveBrain(
             time = time,
             liveCapReached = usage.liveCapReached(),
         )?.let { return it }
+        Log.i(TAG, "live begin")
         openSession?.close()
         val system = PromptFitter().memorySystem(
             baseSystem = ModelConfig.SYSTEM_PROMPT,
@@ -73,9 +90,12 @@ class GeminiLiveBrain(
         val session = GeminiLiveSession(scope, registry, time, usage, system)
         openSession = session
         return try {
-            when (val first = session.open(request.utterance)) {
+            // await() is cancellable even when the socket connect ignores cancellation.
+            val first = withTimeoutOrNull(OPEN_TIMEOUT_MS) { session.open(request.utterance) }
+            when (first) {
                 null -> {
                     session.close()
+                    Log.w(TAG, "live open ended without an answer")
                     BrainResult.Failure(id, BrainError.Unavailable)
                 }
                 else -> {
@@ -103,6 +123,7 @@ class GeminiLiveBrain(
 
     companion object {
         const val ID = "gemini-live"
+        private const val OPEN_TIMEOUT_MS = 20_000L
     }
 }
 
@@ -151,10 +172,17 @@ private class GeminiLiveSession(
             try {
                 drive(utterance, deferred)
             } catch (cancelled: CancellationException) {
-                if (!deferred.isCompleted) deferred.cancel(cancelled)
+                Log.w(TAG, "live drive cancelled: ${cancelled.javaClass.simpleName}", cancelled)
+                if (!isActive) {
+                    if (!deferred.isCompleted) deferred.cancel(cancelled)
+                    throw cancelled
+                }
+                if (!deferred.isCompleted) {
+                    deferred.completeExceptionally(IllegalStateException("live session ended"))
+                }
             } catch (error: Throwable) {
                 if (!deferred.isCompleted) deferred.completeExceptionally(error)
-                else Log.w(TAG, "live follow-up failed: ${error.javaClass.simpleName}")
+                else Log.w(TAG, "live follow-up failed", error)
             }
         }
         return deferred.await()
@@ -219,6 +247,7 @@ private class GeminiLiveSession(
                     turnDeadline = System.nanoTime() + TURN_WAIT_NS
                 }
                 is Note.Failed -> {
+                    Log.w(TAG, "live session failed", note.error)
                     if (QuotaSignals.isRateLimit(note.error) || QuotaSignals.isNotConfigured(note.error)) {
                         throw note.error
                     }
@@ -277,6 +306,7 @@ private class GeminiLiveSession(
                     connect(model, utterance, resend = false)
                 }
                 is Note.Failed -> {
+                    Log.w(TAG, "live follow-up session failed", note.error)
                     if (QuotaSignals.isRateLimit(note.error)) throw note.error
                     if (!reconnect()) {
                         followEvents.trySend(LiveEvent.Closed)
@@ -391,21 +421,43 @@ private class GeminiLiveSession(
     }
 
     private suspend fun openSocket(model: LiveGenerativeModel): LiveSession {
-        val resume = handle?.let { SessionResumptionConfig(it) } ?: SessionResumptionConfig()
-        return try {
-            model.connect(resume)
+        val stored = handle
+        // An empty SessionResumptionConfig still serializes a resumption block. Omit it
+        // until the server has given us a handle.
+        val first = connectWithin(model, stored?.let { SessionResumptionConfig(it) })
+        if (first != null) return first
+        if (stored == null) throw IllegalStateException("live connect ended")
+        Log.w(TAG, "live connect retry without resumption")
+        handle = null
+        return connectWithin(model, null) ?: throw IllegalStateException("live connect ended")
+    }
+
+    private suspend fun connectWithin(
+        model: LiveGenerativeModel,
+        resume: SessionResumptionConfig?,
+    ): LiveSession? {
+        try {
+            val opened = withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
+                if (resume == null) model.connect() else model.connect(resume)
+            }
+            if (opened == null) Log.w(TAG, "live connect timed out")
+            return opened
         } catch (cancelled: CancellationException) {
-            throw cancelled
+            if (!currentCoroutineContext().isActive) throw cancelled
+            // OkHttp's websocket actor cancels its channel when the socket ends. That is a
+            // failed connect, not a cancelled question.
+            Log.w(TAG, "live connect cancelled", cancelled)
+            return null
         } catch (error: Throwable) {
             if (QuotaSignals.isRateLimit(error) || QuotaSignals.isNotConfigured(error)) throw error
-            Log.w(TAG, "live connect with resumption failed: ${error.javaClass.simpleName}")
-            handle = null
-            model.connect()
+            Log.w(TAG, "live connect failed", error)
+            return null
         }
     }
 
     private companion object {
         const val FIRST_WAIT_NS = 8_000_000_000L
         const val TURN_WAIT_NS = 20_000_000_000L
+        const val CONNECT_TIMEOUT_MS = 12_000L
     }
 }

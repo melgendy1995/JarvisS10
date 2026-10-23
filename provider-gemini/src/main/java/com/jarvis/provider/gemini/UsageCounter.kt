@@ -47,7 +47,8 @@ class UsageCounter(
     }
 
     private fun today(): Usage {
-        val day = LocalDate.ofInstant(time.now(), zone)
+        // LocalDate.ofInstant is API 34. This phone is API 31, so derive the day from atZone.
+        val day = time.now().atZone(zone).toLocalDate()
         val stored = store.read()
         return if (stored != null && stored.day == day) stored else Usage(day)
     }
