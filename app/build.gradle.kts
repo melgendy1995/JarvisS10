@@ -2,6 +2,11 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.google.services) apply false
+}
+
+if (file("google-services.json").exists()) {
+    pluginManager.apply("com.google.gms.google-services")
 }
 
 android {
@@ -46,6 +51,7 @@ dependencies {
     implementation(project(":core"))
     implementation(project(":orb"))
     implementation(project(":audio"))
+    implementation(project(":provider-gemini"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)

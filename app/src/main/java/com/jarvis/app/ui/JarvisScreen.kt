@@ -83,7 +83,13 @@ fun JarvisScreen(viewModel: JarvisViewModel) {
             Spacer(Modifier.weight(1f))
             StateLabel(ui.orb, ui.accent)
             Spacer(Modifier.height(12.dp))
-            Captions(you = ui.you, reply = ui.reply, phase = ui.orb)
+            Captions(
+                you = ui.you,
+                reply = ui.reply,
+                phase = ui.orb,
+                brain = ui.brain,
+                accent = ui.accent,
+            )
             HoldToTalk(
                 holding = ui.holding,
                 onHoldStart = viewModel::onHoldStart,
@@ -129,10 +135,16 @@ private fun StateLabel(phase: OrbState, accent: BrainAccent) {
 }
 
 @Composable
-private fun Captions(you: String, reply: String, phase: OrbState) {
+private fun Captions(
+    you: String,
+    reply: String,
+    phase: OrbState,
+    brain: String,
+    accent: BrainAccent,
+) {
     var alpha by remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(you, reply, phase) {
-        if (you.isEmpty() && reply.isEmpty()) {
+    LaunchedEffect(you, reply, phase, brain) {
+        if (you.isEmpty() && reply.isEmpty() && brain.isEmpty()) {
             alpha = 0f
             return@LaunchedEffect
         }
@@ -143,6 +155,7 @@ private fun Captions(you: String, reply: String, phase: OrbState) {
         }
     }
     val animated by animateFloatAsState(alpha, animationSpec = tween(600), label = "caption")
+    val accentColor = Color(accent.red, accent.green, accent.blue)
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -150,6 +163,17 @@ private fun Captions(you: String, reply: String, phase: OrbState) {
             .graphicsLayer { this.alpha = animated },
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        if (brain.isNotEmpty()) {
+            Text(
+                text = brain,
+                color = accentColor.copy(alpha = 0.75f),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Light,
+                letterSpacing = 2.sp,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(6.dp))
+        }
         if (you.isNotEmpty()) {
             Text(
                 text = you,
