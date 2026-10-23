@@ -40,6 +40,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.launch
 
 class JarvisApplication : Application() {
     val announcements = MutableSharedFlow<String>(extraBufferCapacity = 8)
@@ -67,6 +68,26 @@ class JarvisApplication : Application() {
     private var firebaseReady = false
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /**
+     * Outlives the recognizer and a Live socket. The voice loop and DEBUG_ASK both
+     * run here, and only a new hold or clearing the ViewModel cancels an utterance.
+     */
+    val voiceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    @Volatile
+    var onVoiceUtterance: (suspend (String) -> Unit)? = null
+
+    /** Same entry the recognizer uses, including speech. Logs and returns when the activity is down. */
+    suspend fun runVoiceUtterance(text: String) {
+        val handler = onVoiceUtterance
+        if (handler == null) {
+            Log.w("JarvisVoice", "voice loop is not running")
+            return
+        }
+        val job = voiceScope.launch { handler(text) }
+        job.join()
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -126,7 +147,7 @@ class JarvisApplication : Application() {
                 geminiText,
                 groqBrain,
             ),
-        )
+        ) { line -> Log.i("JarvisBrain", line) }
         Log.i(
             "JarvisGroq",
             "ready proxy=${groqProxyConfigured()} bearer=${bearerStore.get().isNotBlank()} keystore=${bearerStore.isOpen()}",

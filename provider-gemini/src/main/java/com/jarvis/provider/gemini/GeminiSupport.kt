@@ -22,8 +22,12 @@ import com.jarvis.core.skills.SkillRegistry
 import java.time.LocalDate
 
 internal object GeminiModels {
-    fun text(registry: SkillRegistry, system: String = ModelConfig.SYSTEM_PROMPT) = firebase().generativeModel(
-        ModelConfig.TEXT_MODEL,
+    fun text(
+        registry: SkillRegistry,
+        system: String = ModelConfig.SYSTEM_PROMPT,
+        model: String = ModelConfig.TEXT_MODEL,
+    ) = firebase().generativeModel(
+        model,
         null,
         null,
         toolList(registry),
@@ -41,8 +45,12 @@ internal object GeminiModels {
         content("system") { text(system) },
     )
 
-    fun live(registry: SkillRegistry, system: String = ModelConfig.SYSTEM_PROMPT) = firebase().liveModel(
-        ModelConfig.LIVE_MODEL,
+    fun live(
+        registry: SkillRegistry,
+        system: String = ModelConfig.SYSTEM_PROMPT,
+        model: String = ModelConfig.LIVE_MODEL,
+    ) = firebase().liveModel(
+        model,
         liveGenerationConfig {
             responseModality = ResponseModality.AUDIO
             inputAudioTranscription = AudioTranscriptionConfig()
@@ -54,6 +62,8 @@ internal object GeminiModels {
     )
 
     private fun firebase() = Firebase.ai(backend = GenerativeBackend.googleAI())
+
+    const val BACKEND = "googleAI"
 
     private fun toolList(registry: SkillRegistry): List<Tool> {
         val declarations = SkillTools.declarations(registry)
@@ -89,7 +99,9 @@ internal fun Throwable.toBrainFailure(
     cooldown: GeminiCooldown,
     time: TimeSource,
 ): BrainResult.Failure {
+    val chain = causeChain()
     if (QuotaSignals.isRateLimit(this)) {
+        Log.w(TAG, "gemini rate limited id=$id $chain", this)
         val applied = cooldown.cool(QuotaSignals.messages(this), QuotaSignals.retryAfter(this))
         return BrainResult.Failure(
             id,
@@ -97,10 +109,45 @@ internal fun Throwable.toBrainFailure(
         )
     }
     if (QuotaSignals.isNotConfigured(this)) {
+        Log.w(TAG, "gemini not configured id=$id $chain", this)
         return BrainResult.Failure(id, BrainError.NotConfigured)
     }
-    Log.w(TAG, "Gemini call failed: ${javaClass.simpleName}", this)
+    Log.w(TAG, "gemini failed id=$id $chain", this)
     return BrainResult.Failure(id, BrainError.Unavailable)
+}
+
+/** Class and message of this throwable, its causes, and its suppressed throwables. Tokens are stripped. */
+internal fun Throwable.causeChain(): String {
+    val parts = ArrayList<String>()
+    val seen = HashSet<Int>()
+    fun walk(error: Throwable) {
+        if (!seen.add(System.identityHashCode(error))) return
+        val message = redact(error.message.orEmpty()).take(240)
+        parts += "${error.javaClass.name}: $message"
+        error.cause?.let(::walk)
+        error.suppressed.forEach(::walk)
+    }
+    walk(this)
+    return parts.joinToString(" <- ")
+}
+
+internal fun Throwable.isModelRejected(): Boolean {
+    val text = causeChain()
+    return text.contains("not found", ignoreCase = true) ||
+        text.contains("unknown model", ignoreCase = true) ||
+        text.contains("invalid model", ignoreCase = true) ||
+        text.contains("is not supported", ignoreCase = true) ||
+        text.contains("unsupported model", ignoreCase = true) ||
+        text.contains("was not found", ignoreCase = true) ||
+        text.contains("does not exist", ignoreCase = true) ||
+        (text.contains("404") && text.contains("model", ignoreCase = true))
+}
+
+internal fun redact(message: String): String {
+    return message
+        .replace(Regex("""gsk_[A-Za-z0-9_\-]+"""), "gsk_[redacted]")
+        .replace(Regex("""Bearer\s+\S+""", RegexOption.IGNORE_CASE), "Bearer [redacted]")
+        .replace(Regex("""ya29\.[A-Za-z0-9_\-.]+"""), "ya29.[redacted]")
 }
 
 internal const val TAG = "JarvisGemini"

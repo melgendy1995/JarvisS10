@@ -6,7 +6,12 @@ import com.jarvis.core.skills.SkillCall
 import com.jarvis.core.skills.SkillRegistry
 import com.jarvis.core.skills.SkillResult
 import java.time.Duration
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -152,6 +157,41 @@ class BrainChainTest {
         assertEquals("Continuing: 2", result.text)
         assertEquals(BrainAccent.GROQ, result.accent)
         assertEquals(request, groq.lastRequest)
+    }
+
+    @Test
+    fun parentCancelSkipsTheRestOfTheChain() = runBlocking {
+        val started = CompletableDeferred<Unit>()
+        val live = fake("gemini-live") {
+            started.complete(Unit)
+            suspendCancellableCoroutine { }
+        }
+        val text = fake("gemini-text") {
+            BrainResult.Answer("gemini-text", BrainAccent.GEMINI, "nope")
+        }
+        val job = launch {
+            BrainChain(router, listOf(live, text)).reply(BrainRequest("tell me a joke"))
+        }
+        withTimeout(2_000) { started.await() }
+        job.cancelAndJoin()
+        assertEquals(0, text.calls)
+        assertTrue(job.isCancelled)
+    }
+
+    @Test
+    fun logsEachStepWithBrainIdAndElapsed() = runBlocking {
+        val lines = mutableListOf<String>()
+        val live = fake("gemini-live") {
+            BrainResult.Failure("gemini-live", BrainError.Unavailable)
+        }
+        val text = fake("gemini-text") {
+            BrainResult.Answer("gemini-text", BrainAccent.GEMINI, "Hi")
+        }
+        val result = BrainChain(router, listOf(live, text), lines::add)
+            .reply(BrainRequest("tell me a joke")) as BrainResult.Answer
+        assertEquals("Hi", result.text)
+        assertTrue(lines.any { it.startsWith("brain=gemini-live outcome=failure:Unavailable elapsedMs=") })
+        assertTrue(lines.any { it.startsWith("brain=gemini-text outcome=answer elapsedMs=") })
     }
 
     @Test

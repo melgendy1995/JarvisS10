@@ -169,6 +169,35 @@ class UsageAndCooldownTest {
     }
 
     @Test
+    fun liveCircuitSkipsForFiveMinutesThenOpens() {
+        val circuit = LiveCircuit(windowMs = 5 * 60_000L)
+        assertFalse(circuit.skip(1_000))
+        circuit.mark(1_000)
+        assertTrue(circuit.skip(1_000))
+        assertTrue(circuit.skip(1_000 + 5 * 60_000L - 1))
+        assertFalse(circuit.skip(1_000 + 5 * 60_000L))
+        circuit.clear()
+        assertFalse(circuit.skip(9_000))
+    }
+
+    @Test
+    fun causeChainRedactsSecretsAndDetectsARejectedModel() {
+        val rejected = IllegalArgumentException(
+            "models/gemini-3.1-flash-live-preview was not found Bearer secret ya29.token gsk_live_secret",
+        )
+        val chain = rejected.causeChain()
+        assertTrue(chain.contains("was not found"))
+        assertTrue(chain.contains("Bearer [redacted]"))
+        assertTrue(chain.contains("ya29.[redacted]"))
+        assertTrue(chain.contains("gsk_[redacted]"))
+        assertFalse(chain.contains("ya29.token"))
+        assertFalse(chain.contains("gsk_live"))
+        assertTrue(rejected.isModelRejected())
+        assertTrue(RuntimeException("Channel was cancelled", rejected).isModelRejected())
+        assertFalse(IllegalStateException("Channel was cancelled").isModelRejected())
+    }
+
+    @Test
     fun transcriptsAcceptCumulativeAndPiecewiseChunks() {
         val text = StringBuilder()
         Transcripts.append(text, "Hello")

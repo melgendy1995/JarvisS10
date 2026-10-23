@@ -34,8 +34,10 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withTimeoutOrNull
 import android.util.Log
 import kotlinx.coroutines.CancellationException
@@ -48,11 +50,14 @@ class GeminiLiveBrain(
     private val usage: UsageCounter,
     private val registry: SkillRegistry,
     private val time: TimeSource = SystemTimeSource,
+    private val circuit: LiveCircuit = LiveCircuit(),
+    private val nowMs: () -> Long = System::currentTimeMillis,
 ) : Brain {
     override val id: String = ID
     override val accent: BrainAccent = BrainAccent.GEMINI
 
     @Volatile private var openSession: GeminiLiveSession? = null
+    @Volatile private var lastModelRejected: Boolean = false
 
     override suspend fun reply(request: BrainRequest): BrainResult {
         return try {
@@ -60,7 +65,7 @@ class GeminiLiveBrain(
         } catch (cancelled: CancellationException) {
             if (!currentCoroutineContext().isActive) throw cancelled
             openSession?.close()
-            Log.w(TAG, "Gemini call failed: ${cancelled.javaClass.simpleName}", cancelled)
+            Log.w(TAG, "live reply cancelled ${cancelled.causeChain()}", cancelled)
             BrainResult.Failure(id, BrainError.Unavailable)
         } catch (error: Throwable) {
             openSession?.close()
@@ -77,7 +82,35 @@ class GeminiLiveBrain(
             time = time,
             liveCapReached = usage.liveCapReached(),
         )?.let { return it }
-        Log.i(TAG, "live begin")
+        if (circuit.skip(nowMs())) {
+            Log.i(TAG, "live skipped (recent failure)")
+            return BrainResult.Failure(id, BrainError.Unavailable)
+        }
+        val models = listOf(ModelConfig.LIVE_MODEL, ModelConfig.LIVE_MODEL_FALLBACK).distinct()
+        var last = BrainResult.Failure(id, BrainError.Unavailable)
+        for ((index, model) in models.withIndex()) {
+            val outcome = oneSession(request, model)
+            if (outcome is BrainResult.Answer) {
+                circuit.clear()
+                return outcome
+            }
+            last = outcome as BrainResult.Failure
+            val rejected = lastModelRejected
+            lastModelRejected = false
+            val blocked = last.error is BrainError.RateLimited || last.error == BrainError.NotConfigured
+            if (blocked) return last
+            if (!rejected || index == models.lastIndex) {
+                circuit.mark(nowMs())
+                return last
+            }
+            Log.w(TAG, "live model rejected model=$model fallback=${models[index + 1]}")
+        }
+        circuit.mark(nowMs())
+        return last
+    }
+
+    private suspend fun oneSession(request: BrainRequest, modelName: String): BrainResult {
+        Log.i(TAG, "live begin model=$modelName backend=${GeminiModels.BACKEND} modality=AUDIO")
         openSession?.close()
         val system = PromptFitter().memorySystem(
             baseSystem = ModelConfig.SYSTEM_PROMPT,
@@ -87,15 +120,16 @@ class GeminiLiveBrain(
             priorTurns = request.turns,
             charBudget = PromptFitter.LIVE_CHAR_BUDGET,
         )
-        val session = GeminiLiveSession(scope, registry, time, usage, system)
+        val session = GeminiLiveSession(scope, registry, time, usage, system, modelName)
         openSession = session
         return try {
-            // await() is cancellable even when the socket connect ignores cancellation.
             val first = withTimeoutOrNull(OPEN_TIMEOUT_MS) { session.open(request.utterance) }
             when (first) {
                 null -> {
+                    noteRejection(session)
+                    val detail = session.lastDetail
                     session.close()
-                    Log.w(TAG, "live open ended without an answer")
+                    Log.w(TAG, "live open ended without an answer model=$modelName $detail")
                     BrainResult.Failure(id, BrainError.Unavailable)
                 }
                 else -> {
@@ -113,12 +147,27 @@ class GeminiLiveBrain(
                 }
             }
         } catch (cancelled: CancellationException) {
+            noteRejection(session)
+            val detail = session.lastDetail
             session.close()
-            throw cancelled
+            Log.w(TAG, "live cancelled model=$modelName $detail ${cancelled.causeChain()}", cancelled)
+            if (!currentCoroutineContext().isActive) throw cancelled
+            BrainResult.Failure(id, BrainError.Unavailable)
         } catch (error: Throwable) {
+            noteRejection(session, error)
+            val detail = session.lastDetail
             session.close()
+            if (lastModelRejected) {
+                Log.w(TAG, "live model not found model=$modelName $detail ${error.causeChain()}", error)
+            }
             error.toBrainFailure(id, cooldown, time)
         }
+    }
+
+    private fun noteRejection(session: GeminiLiveSession, error: Throwable? = null) {
+        lastModelRejected = session.modelRejected ||
+            (error?.isModelRejected() == true) ||
+            IllegalStateException(session.lastDetail).isModelRejected()
     }
 
     companion object {
@@ -148,6 +197,7 @@ private class GeminiLiveSession(
     private val time: TimeSource,
     private val usage: UsageCounter,
     private val system: String,
+    private val modelName: String,
 ) : LiveFollowUp {
     override val followUpWindow: Duration = Duration.ofMillis(ModelConfig.FOLLOW_UP_WINDOW_MS)
     private val followEvents = Channel<LiveEvent>(Channel.UNLIMITED)
@@ -166,23 +216,29 @@ private class GeminiLiveSession(
     private var driveJob: Job? = null
     private val startedAt = time.now()
 
+    @Volatile var lastDetail: String = ""
+    @Volatile var modelRejected: Boolean = false
+
     suspend fun open(utterance: String): FirstTurn? {
         val deferred = CompletableDeferred<FirstTurn?>()
         driveJob = scope.launch {
             try {
                 drive(utterance, deferred)
             } catch (cancelled: CancellationException) {
-                Log.w(TAG, "live drive cancelled: ${cancelled.javaClass.simpleName}", cancelled)
-                if (!isActive) {
-                    if (!deferred.isCompleted) deferred.cancel(cancelled)
-                    throw cancelled
-                }
+                val socket = session
+                val detail = if (socket != null) closeDetailQuiet(socket) else lastDetail.ifBlank { "no session" }
+                if (socket != null) lastDetail = detail
+                Log.w(TAG, "live drive cancelled model=$modelName close=$detail ${cancelled.causeChain()}", cancelled)
+                // Complete with a normal exception. Cancelling the deferred would
+                // cancel the voice job that is waiting, and Groq would never run.
                 if (!deferred.isCompleted) {
-                    deferred.completeExceptionally(IllegalStateException("live session ended"))
+                    deferred.completeExceptionally(LiveSocketEnded(cancelled, detail))
                 }
             } catch (error: Throwable) {
+                if (lastDetail.isBlank()) lastDetail = error.causeChain()
+                if (error.isModelRejected()) modelRejected = true
                 if (!deferred.isCompleted) deferred.completeExceptionally(error)
-                else Log.w(TAG, "live follow-up failed", error)
+                else Log.w(TAG, "live follow-up failed ${error.causeChain()}", error)
             }
         }
         return deferred.await()
@@ -217,7 +273,7 @@ private class GeminiLiveSession(
     }
 
     private suspend fun drive(utterance: String, first: CompletableDeferred<FirstTurn?>) {
-        val model = GeminiModels.live(registry, system)
+        val model = GeminiModels.live(registry, system, modelName)
         connect(model, utterance, resend = true)
         val audio = ByteArrayOutputStream()
         val transcript = StringBuilder()
@@ -247,7 +303,8 @@ private class GeminiLiveSession(
                     turnDeadline = System.nanoTime() + TURN_WAIT_NS
                 }
                 is Note.Failed -> {
-                    Log.w(TAG, "live session failed", note.error)
+                    if (note.error.isModelRejected()) modelRejected = true
+                    Log.w(TAG, "live session failed model=$modelName ${note.error.causeChain()}", note.error)
                     if (QuotaSignals.isRateLimit(note.error) || QuotaSignals.isNotConfigured(note.error)) {
                         throw note.error
                     }
@@ -306,7 +363,7 @@ private class GeminiLiveSession(
                     connect(model, utterance, resend = false)
                 }
                 is Note.Failed -> {
-                    Log.w(TAG, "live follow-up session failed", note.error)
+                    Log.w(TAG, "live follow-up session failed model=$modelName ${note.error.causeChain()}", note.error)
                     if (QuotaSignals.isRateLimit(note.error)) throw note.error
                     if (!reconnect()) {
                         followEvents.trySend(LiveEvent.Closed)
@@ -403,21 +460,47 @@ private class GeminiLiveSession(
             runCatching { previous.close() }
         }
         val opened = openSocket(model)
+        Log.i(TAG, "live setup acknowledged model=$modelName backend=${GeminiModels.BACKEND} modality=AUDIO")
         connected = true
         mutex.withLock { session = opened }
-        receiveJob = scope.launch {
+        receiveJob = scope.launch receiveLoop@{
             try {
                 opened.receive().collect { message ->
                     if (gen == generation && !intentional.get()) notes.send(Note.Message(gen, message))
                 }
                 if (gen == generation && !intentional.get()) notes.send(Note.Ended(gen))
             } catch (cancelled: CancellationException) {
-                throw cancelled
+                if (intentional.get()) return@receiveLoop
+                val detail = closeDetailQuiet(opened)
+                lastDetail = detail
+                val ended = LiveSocketEnded(cancelled, detail)
+                if (ended.isModelRejected()) modelRejected = true
+                Log.w(TAG, "live receive cancelled model=$modelName close=$detail ${cancelled.causeChain()}", cancelled)
+                if (gen == generation && !intentional.get()) notes.trySend(Note.Failed(gen, ended))
             } catch (error: Throwable) {
-                if (gen == generation && !intentional.get()) notes.send(Note.Failed(gen, error))
+                val detail = closeDetailQuiet(opened)
+                lastDetail = detail
+                if (error.isModelRejected()) modelRejected = true
+                Log.w(TAG, "live receive failed model=$modelName close=$detail ${error.causeChain()}", error)
+                if (gen == generation && !intentional.get()) notes.trySend(Note.Failed(gen, error))
             }
         }
-        if (resend) opened.send(utterance)
+        if (resend) {
+            try {
+                opened.send(utterance)
+            } catch (cancelled: CancellationException) {
+                val detail = closeDetailQuiet(opened)
+                lastDetail = detail
+                Log.w(TAG, "live send cancelled model=$modelName close=$detail ${cancelled.causeChain()}", cancelled)
+                if (!currentCoroutineContext().isActive) throw cancelled
+                throw LiveSocketEnded(cancelled, detail)
+            } catch (error: Throwable) {
+                val detail = closeDetailQuiet(opened)
+                lastDetail = detail
+                Log.w(TAG, "live send failed model=$modelName close=$detail ${error.causeChain()}", error)
+                throw error
+            }
+        }
     }
 
     private suspend fun openSocket(model: LiveGenerativeModel): LiveSession {
@@ -426,10 +509,10 @@ private class GeminiLiveSession(
         // until the server has given us a handle.
         val first = connectWithin(model, stored?.let { SessionResumptionConfig(it) })
         if (first != null) return first
-        if (stored == null) throw IllegalStateException("live connect ended")
-        Log.w(TAG, "live connect retry without resumption")
+        if (stored == null) throw IllegalStateException("live connect ended $lastDetail")
+        Log.w(TAG, "live connect retry without resumption model=$modelName")
         handle = null
-        return connectWithin(model, null) ?: throw IllegalStateException("live connect ended")
+        return connectWithin(model, null) ?: throw IllegalStateException("live connect ended $lastDetail")
     }
 
     private suspend fun connectWithin(
@@ -437,20 +520,29 @@ private class GeminiLiveSession(
         resume: SessionResumptionConfig?,
     ): LiveSession? {
         try {
-            val opened = withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
-                if (resume == null) model.connect() else model.connect(resume)
+            // The websocket actor is a child of connect(). A server close cancels that
+            // child. supervisorScope keeps the voice job alive so text and Groq still run.
+            val opened = supervisorScope {
+                withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
+                    if (resume == null) model.connect() else model.connect(resume)
+                }
             }
-            if (opened == null) Log.w(TAG, "live connect timed out")
+            if (opened == null) {
+                lastDetail = "connect timeout"
+                Log.w(TAG, "live connect timed out model=$modelName")
+            }
             return opened
         } catch (cancelled: CancellationException) {
+            val detail = "connect cancelled ${cancelled.causeChain()}"
+            lastDetail = detail
+            Log.w(TAG, "live connect cancelled model=$modelName $detail", cancelled)
             if (!currentCoroutineContext().isActive) throw cancelled
-            // OkHttp's websocket actor cancels its channel when the socket ends. That is a
-            // failed connect, not a cancelled question.
-            Log.w(TAG, "live connect cancelled", cancelled)
             return null
         } catch (error: Throwable) {
+            lastDetail = error.causeChain()
+            if (error.isModelRejected()) modelRejected = true
             if (QuotaSignals.isRateLimit(error) || QuotaSignals.isNotConfigured(error)) throw error
-            Log.w(TAG, "live connect failed", error)
+            Log.w(TAG, "live connect failed model=$modelName ${error.causeChain()}", error)
             return null
         }
     }
@@ -459,5 +551,63 @@ private class GeminiLiveSession(
         const val FIRST_WAIT_NS = 8_000_000_000L
         const val TURN_WAIT_NS = 20_000_000_000L
         const val CONNECT_TIMEOUT_MS = 12_000L
+    }
+}
+
+/** A socket closed itself. This is not a cancelled question. */
+private class LiveSocketEnded(
+    cause: Throwable,
+    val detail: String,
+) : Exception("live socket ended $detail", cause)
+
+private suspend fun closeDetailQuiet(session: LiveSession?): String {
+    return try {
+        liveCloseDetail(session)
+    } catch (cancelled: CancellationException) {
+        if (!currentCoroutineContext().isActive) "close skipped"
+        else "close reason cancelled ${cancelled.javaClass.simpleName}"
+    } catch (error: Throwable) {
+        "close unread ${error.javaClass.simpleName}"
+    }
+}
+
+/**
+ * Firebase AI keeps the ktor socket private. Read the close code before the session
+ * is closed, without taking a compile dependency on ktor.
+ */
+private suspend fun liveCloseDetail(session: LiveSession?): String {
+    if (session == null) return "no session"
+    return try {
+        val liveClass = LiveSession::class.java
+        val accessName = "access" + '$' + "getSession" + '$' + "p"
+        val access = liveClass.getDeclaredMethod(accessName, liveClass)
+        val socket = access.invoke(null, session) ?: return "no websocket"
+        val getter = socket.javaClass.methods.firstOrNull { it.name == "getCloseReason" && it.parameterCount == 0 }
+            ?: return "no closeReason method"
+        val deferred = getter.invoke(socket) as? Deferred<*> ?: return "no closeReason"
+        val reason = withTimeoutOrNull(500) {
+            try {
+                deferred.await()
+            } catch (cancelled: CancellationException) {
+                if (!currentCoroutineContext().isActive) throw cancelled
+                null
+            }
+        } ?: return if (deferred.isCompleted) "close reason empty" else "close reason pending"
+        val codeObject = reason.javaClass.methods
+            .firstOrNull { it.name == "getCode" && it.parameterCount == 0 }
+            ?.invoke(reason)
+        val code = codeObject?.javaClass?.methods
+            ?.firstOrNull { it.name == "getCode" && it.parameterCount == 0 }
+            ?.invoke(codeObject)
+            ?: codeObject
+        val message = reason.javaClass.methods
+            .firstOrNull { it.name == "getMessage" && it.parameterCount == 0 }
+            ?.invoke(reason) as? String
+        "code=$code message=${redact(message.orEmpty())}"
+    } catch (cancelled: CancellationException) {
+        if (!currentCoroutineContext().isActive) throw cancelled
+        "close reason cancelled"
+    } catch (error: Throwable) {
+        "close reason unreadable: ${error.javaClass.simpleName}"
     }
 }

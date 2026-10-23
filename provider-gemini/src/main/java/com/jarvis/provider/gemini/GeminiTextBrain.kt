@@ -12,9 +12,12 @@ import com.jarvis.core.brain.Speaker
 import com.jarvis.core.skills.SkillRegistry
 import android.util.Log
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 class GeminiTextBrain(
     private val configured: () -> Boolean,
@@ -28,27 +31,19 @@ class GeminiTextBrain(
     override val accent: BrainAccent = BrainAccent.GEMINI
 
     override suspend fun reply(request: BrainRequest): BrainResult {
-        return try {
-            gate(id, configured, online, cooldown, time)?.let { return it }
-            Log.i(TAG, "text begin")
-            usage.recordTextRequest()
-            val spoken = withTimeoutOrNull(TEXT_TIMEOUT_MS) { complete(request) }
-            if (spoken == null || spoken.text.isBlank()) {
-                BrainResult.Failure(id, BrainError.Unavailable)
-            } else {
-                BrainResult.Answer(
-                    brainId = id,
-                    accent = accent,
-                    text = spoken.text,
-                    needsPermission = spoken.needsPermission,
-                )
-            }
-        } catch (cancelled: CancellationException) {
-            if (!currentCoroutineContext().isActive) throw cancelled
-            cancelled.toBrainFailure(id, cooldown, time)
-        } catch (error: Throwable) {
-            error.toBrainFailure(id, cooldown, time)
+        gate(id, configured, online, cooldown, time)?.let { return it }
+        val models = listOf(ModelConfig.TEXT_MODEL, ModelConfig.TEXT_MODEL_FALLBACK).distinct()
+        var last: BrainResult.Failure = BrainResult.Failure(id, BrainError.Unavailable)
+        for ((index, model) in models.withIndex()) {
+            val outcome = completeWithin(request, model)
+            if (outcome is BrainResult.Answer) return outcome
+            last = outcome as BrainResult.Failure
+            val rejected = lastModelRejected
+            lastModelRejected = false
+            if (!rejected || index == models.lastIndex) return last
+            Log.w(TAG, "text model rejected model=$model fallback=${models[index + 1]}")
         }
+        return last
     }
 
     override suspend fun summarize(prompt: String): BrainResult {
@@ -71,7 +66,60 @@ class GeminiTextBrain(
         }
     }
 
-    private suspend fun complete(request: BrainRequest): Spoken {
+    /**
+     * One text call. Timeout, a blank body, or any error becomes [BrainResult.Failure]
+     * so the chain can continue. A parent cancel still propagates.
+     * SDK socket cancellation is wrapped so it does not cancel the voice job.
+     */
+    private suspend fun completeWithin(request: BrainRequest, model: String): BrainResult {
+        Log.i(TAG, "text begin model=$model backend=${GeminiModels.BACKEND}")
+        return try {
+            usage.recordTextRequest()
+            val spoken = withTimeout(TEXT_TIMEOUT_MS) {
+                withContext(Dispatchers.IO) {
+                    try {
+                        complete(request, model)
+                    } catch (cancelled: CancellationException) {
+                        if (cancelled is TimeoutCancellationException) throw cancelled
+                        if (!currentCoroutineContext().isActive) throw cancelled
+                        throw TextCancelled(cancelled)
+                    }
+                }
+            }
+            val text = spoken.text.trim()
+            if (text.isEmpty()) {
+                Log.w(TAG, "text blank model=$model")
+                BrainResult.Failure(id, BrainError.Unavailable)
+            } else {
+                Log.i(TAG, "text result model=$model chars=${text.length} preview=${preview(text)}")
+                BrainResult.Answer(
+                    brainId = id,
+                    accent = accent,
+                    text = text,
+                    needsPermission = spoken.needsPermission,
+                )
+            }
+        } catch (timeout: TimeoutCancellationException) {
+            Log.w(TAG, "text timeout model=$model ms=$TEXT_TIMEOUT_MS", timeout)
+            BrainResult.Failure(id, BrainError.Unavailable)
+        } catch (wrapped: TextCancelled) {
+            val cause = wrapped.cause ?: wrapped
+            Log.w(TAG, "text cancelled model=$model ${cause.causeChain()}", cause)
+            BrainResult.Failure(id, BrainError.Unavailable)
+        } catch (cancelled: CancellationException) {
+            if (!currentCoroutineContext().isActive) throw cancelled
+            Log.w(TAG, "text cancelled model=$model ${cancelled.causeChain()}", cancelled)
+            BrainResult.Failure(id, BrainError.Unavailable)
+        } catch (error: Throwable) {
+            lastModelRejected = error.isModelRejected()
+            if (lastModelRejected) {
+                Log.w(TAG, "text model not found model=$model ${error.causeChain()}", error)
+            }
+            error.toBrainFailure(id, cooldown, time)
+        }
+    }
+
+    private suspend fun complete(request: BrainRequest, model: String): Spoken {
         val fitter = PromptFitter()
         val assembled = fitter.memorySystem(
             baseSystem = ModelConfig.SYSTEM_PROMPT,
@@ -81,15 +129,20 @@ class GeminiTextBrain(
             charBudget = PromptFitter.GEMINI_SYSTEM_CHARS,
         )
         val fitted = fitter.fit(assembled, request.turns, request.utterance)
-        val model = GeminiModels.text(registry, fitted.system.ifBlank { ModelConfig.SYSTEM_PROMPT })
+        val generative = GeminiModels.text(
+            registry,
+            fitted.system.ifBlank { ModelConfig.SYSTEM_PROMPT },
+            model,
+        )
         val history = mutableListOf<Content>()
         for (turn in fitted.turns) {
             val role = if (turn.speaker == Speaker.USER) "user" else "model"
             history += content(role) { text(turn.text) }
         }
         if (history.isEmpty()) history += content("user") { text(request.utterance) }
+        Log.i(TAG, "text request model=$model turns=${history.size}")
         val utterance = request.utterance
-        var response = model.generateContent(history)
+        var response = generative.generateContent(history)
         val toolText = StringBuilder()
         var permission: String? = null
         var round = 0
@@ -108,7 +161,7 @@ class GeminiTextBrain(
             history += content("user") {
                 responses.forEach { part(it) }
             }
-            response = model.generateContent(history)
+            response = generative.generateContent(history)
         }
         val text = response.text?.takeIf { it.isNotBlank() } ?: toolText.toString()
         return Spoken(text, permission)
@@ -116,12 +169,21 @@ class GeminiTextBrain(
 
     private data class Spoken(val text: String, val needsPermission: String?)
 
+    /** A child socket cancelled itself. This is not a cancelled question. */
+    private class TextCancelled(cause: CancellationException) : Exception(cause.message, cause)
+
+    @Volatile private var lastModelRejected: Boolean = false
+
     companion object {
         const val ID = "gemini-text"
-        private const val TEXT_TIMEOUT_MS = 30_000L
+        private const val TEXT_TIMEOUT_MS = 8_000L
         private const val MAX_TOOL_ROUNDS = 4
         private const val SUMMARY_SYSTEM =
             "Summarize the conversation memory in a few short sentences. " +
                 "Reply with the summary only. Do not use tools."
     }
+}
+
+private fun preview(text: String): String {
+    return redact(text.replace('\n', ' ')).take(80)
 }

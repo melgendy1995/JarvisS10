@@ -7,18 +7,16 @@ import android.content.Intent
 import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 import com.jarvis.app.JarvisApplication
-import com.jarvis.core.brain.BrainRequest
-import com.jarvis.core.brain.BrainResult
-import com.jarvis.core.brain.LiveFollowUp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 /**
- * Debug-only text entry. While the process is alive:
+ * Debug-only text entry. While the activity's voice loop is up:
  * adb shell am broadcast -a com.jarvis.app.DEBUG_ASK --es q "what is the capital of France"
  * Force the chain onto Groq with --ez gemini false.
+ * [q] is injected as the recognized utterance, then the same voice-loop path speaks the answer.
  */
 object GeminiDebug {
     @Volatile
@@ -53,19 +51,10 @@ class DebugAskReceiver : BroadcastReceiver() {
         askScope.launch {
             val previous = GeminiDebug.enabled
             GeminiDebug.enabled = gemini
-            var follow: LiveFollowUp? = null
             try {
-                Log.i(TAG, "ask gemini=$gemini")
-                when (val result = app.chain.reply(BrainRequest(question))) {
-                    is BrainResult.Answer -> {
-                        follow = result.followUp
-                        Log.i(TAG, "answer brain=${result.brainId} text=${result.text.take(300)}")
-                    }
-                    is BrainResult.Failure -> {
-                        val error = result.error.javaClass.simpleName
-                        Log.i(TAG, "failure brain=${result.brainId} error=$error text=${result.text.take(300)}")
-                    }
-                }
+                Log.i(TAG, "ask gemini=$gemini via voice loop")
+                app.runVoiceUtterance(question)
+                Log.i(TAG, "ask finished gemini=$gemini")
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 val where = cancelled.stackTrace.take(6).joinToString(" | ") {
                     "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}"
@@ -76,7 +65,6 @@ class DebugAskReceiver : BroadcastReceiver() {
                 Log.w(TAG, "debug ask failed", error)
             } finally {
                 GeminiDebug.enabled = previous
-                runCatching { follow?.close() }
                 inFlight.set(false)
                 pending.finish()
             }

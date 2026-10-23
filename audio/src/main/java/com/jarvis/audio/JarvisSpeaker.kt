@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.util.Log
 import java.util.Locale
 
 class JarvisSpeaker(context: Context) {
@@ -13,8 +14,10 @@ class JarvisSpeaker(context: Context) {
     private val tts: TextToSpeech
     private var ready = false
     private var failed = false
-    private var pending: Pair<String, () -> Unit>? = null
+    private var pending: Pending? = null
     private var onDone: (() -> Unit)? = null
+    private var activeUtterance: String? = null
+    private var activeBrain: String = ""
 
     init {
         tts = TextToSpeech(context.applicationContext) { status ->
@@ -23,28 +26,31 @@ class JarvisSpeaker(context: Context) {
                     ready = true
                     tts.setSpeechRate(1.02f)
                     tts.language = Locale.US
-                    pending?.let { (text, done) ->
+                    pending?.let { item ->
                         pending = null
-                        start(text, done)
+                        start(item.text, item.brainId, item.onDone)
                     }
                 } else {
                     failed = true
-                    pending?.second?.invoke()
+                    pending?.onDone?.invoke()
                     pending = null
                 }
             }
         }
     }
 
-    fun speak(text: String, onDone: () -> Unit) {
+    fun speak(text: String, brainId: String, onDone: () -> Unit) {
         main.post {
             when {
-                failed -> onDone()
-                !ready -> {
-                    pending?.second?.invoke()
-                    pending = text to onDone
+                failed -> {
+                    Log.w(TAG, "tts error brain=$brainId")
+                    onDone()
                 }
-                else -> start(text, onDone)
+                !ready -> {
+                    pending?.onDone?.invoke()
+                    pending = Pending(text, brainId, onDone)
+                }
+                else -> start(text, brainId, onDone)
             }
         }
     }
@@ -59,29 +65,58 @@ class JarvisSpeaker(context: Context) {
     fun shutdown() {
         main.post {
             deliverDone()
-            pending?.second?.invoke()
+            pending?.onDone?.invoke()
             pending = null
             runCatching { tts.shutdown() }
         }
     }
 
-    private fun start(text: String, done: () -> Unit) {
+    private fun start(text: String, brainId: String, done: () -> Unit) {
         deliverDone()
         onDone = done
+        activeBrain = brainId
         val arabic = text.any { it in '\u0600'..'\u06FF' }
         tts.language = if (arabic) Locale.forLanguageTag("ar") else Locale.US
+        val utteranceId = "jarvis-${System.nanoTime()}"
+        activeUtterance = utteranceId
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) = Unit
+            override fun onStart(utteranceId: String?) {
+                Log.i(TAG, "tts start brain=$brainId utterance=$utteranceId")
+            }
+
             override fun onDone(utteranceId: String?) = deliverDone()
-            override fun onError(utteranceId: String?) = deliverDone()
+
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) {
+                Log.w(TAG, "tts error brain=$brainId utterance=$utteranceId")
+                deliverDone()
+            }
+
+            override fun onError(utteranceId: String?, errorCode: Int) {
+                Log.w(TAG, "tts error brain=$brainId utterance=$utteranceId code=$errorCode")
+                deliverDone()
+            }
         })
-        val spoken = tts.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), "jarvis-${System.nanoTime()}")
-        if (spoken == TextToSpeech.ERROR) deliverDone()
+        val spoken = tts.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), utteranceId)
+        if (spoken == TextToSpeech.ERROR) {
+            Log.w(TAG, "tts error brain=$brainId utterance=$utteranceId")
+            deliverDone()
+        }
     }
 
     private fun deliverDone() {
         val callback = onDone ?: return
+        val utteranceId = activeUtterance
+        val brainId = activeBrain
+        activeUtterance = null
         onDone = null
+        if (utteranceId != null) Log.i(TAG, "tts done brain=$brainId utterance=$utteranceId")
         main.post { callback() }
+    }
+
+    private data class Pending(val text: String, val brainId: String, val onDone: () -> Unit)
+
+    private companion object {
+        const val TAG = "JarvisVoice"
     }
 }

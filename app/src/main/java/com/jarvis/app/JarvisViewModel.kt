@@ -25,8 +25,10 @@ import com.jarvis.orb.BrainAccent
 import com.jarvis.orb.OrbState
 import com.jarvis.provider.gemini.ModelConfig
 import com.jarvis.provider.groq.BackupSttPolicy
+import android.util.Log
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -69,13 +71,19 @@ private data class Spoken(
     val text: String,
     val accent: BrainAccent,
     val brain: String,
+    val brainId: String,
+)
+
+private data class SpeechItem(
+    val spoken: Spoken,
+    val done: CompletableDeferred<Unit>,
 )
 
 class JarvisViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as JarvisApplication
     private val recognizer = PushToTalkRecognizer(application)
     private val speaker = JarvisSpeaker(application)
-    private val speechQueue = Channel<Spoken>(capacity = 16)
+    private val speechQueue = Channel<SpeechItem>(capacity = 16)
     private val _ui = MutableStateFlow(JarvisUiState())
     val ui = _ui.asStateFlow()
     private val _events = MutableSharedFlow<JarvisEvent>(extraBufferCapacity = 4)
@@ -86,6 +94,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private var routed = false
     private var generation = 0
     private var routeJob: Job? = null
+    private var utteranceJob: Job? = null
     private var waitForResult: Job? = null
     private var pendingPermission: String? = null
     private var mic: PcmMic? = null
@@ -129,17 +138,31 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     )
 
     init {
+        app.onVoiceUtterance = { text -> onRecognizedUtterance(text) }
+        Log.i(VOICE, "voice loop ready")
         viewModelScope.launch {
             app.announcements.collect { message ->
-                speechQueue.send(Spoken(message, BrainAccent.PHONE, "Phone"))
+                speechQueue.send(
+                    SpeechItem(
+                        Spoken(message, BrainAccent.PHONE, "Phone", "phone"),
+                        CompletableDeferred(),
+                    ),
+                )
             }
         }
         viewModelScope.launch {
-            for (spoken in speechQueue) {
+            for (item in speechQueue) {
                 val gen = generation
                 while (holding || liveActive) delay(40)
-                if (gen != generation || spoken.text.isBlank()) continue
-                speakAndWait(spoken)
+                if (gen != generation || item.spoken.text.isBlank()) {
+                    if (!item.done.isCompleted) item.done.complete(Unit)
+                    continue
+                }
+                try {
+                    speakAndWait(item.spoken)
+                } finally {
+                    if (!item.done.isCompleted) item.done.complete(Unit)
+                }
             }
         }
     }
@@ -166,6 +189,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         pendingPcm = ByteArray(0)
         waitForResult?.cancel()
         routeJob?.cancel()
+        utteranceJob?.cancel()
         abandonLive()
         speaker.stop()
         drainQueue()
@@ -329,7 +353,19 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun deliver(text: String) {
+        utteranceJob?.cancel()
         val gen = generation
+        utteranceJob = app.voiceScope.launch {
+            onRecognizedUtterance(text, gen)
+        }
+    }
+
+    /**
+     * Recognizer result and DEBUG_ASK both enter here. The chain runs to the end
+     * on the application voice scope, then this function speaks the answer.
+     */
+    private suspend fun onRecognizedUtterance(text: String, gen: Int = generation) {
+        Log.i(VOICE, "utterance begin chars=${text.length}")
         _ui.update {
             it.copy(
                 orb = OrbState.THINKING,
@@ -340,31 +376,34 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 brain = "",
             )
         }
-        routeJob = viewModelScope.launch {
-            val result = try {
+        val result = try {
+            withContext(Dispatchers.IO) {
                 app.chain.reply(brainRequest(text))
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                BrainResult.Failure(
-                    brainId = "offline",
-                    error = com.jarvis.core.brain.BrainError.Unavailable,
-                    text = "Something went wrong.",
-                )
             }
-            if (!isActive || gen != generation) {
-                (result as? BrainResult.Answer)?.followUp?.close()
-                return@launch
-            }
-            val brainId = when (result) {
-                is BrainResult.Answer -> result.brainId
-                is BrainResult.Failure -> result.brainId
-            }
-            lastBrainId = brainId
-            record(TurnRole.USER, text, brainId)
-            if (result is BrainResult.Answer) record(TurnRole.ASSISTANT, result.text, brainId)
-            present(result, gen)
+        } catch (cancelled: CancellationException) {
+            Log.w(VOICE, "utterance cancelled")
+            throw cancelled
+        } catch (_: Exception) {
+            BrainResult.Failure(
+                brainId = "offline",
+                error = com.jarvis.core.brain.BrainError.Unavailable,
+                text = "Something went wrong.",
+            )
         }
+        if (!coroutineContext.isActive || gen != generation) {
+            Log.i(VOICE, "utterance dropped")
+            (result as? BrainResult.Answer)?.followUp?.close()
+            return
+        }
+        val brainId = when (result) {
+            is BrainResult.Answer -> result.brainId
+            is BrainResult.Failure -> result.brainId
+        }
+        lastBrainId = brainId
+        Log.i(VOICE, "utterance result brain=$brainId")
+        record(TurnRole.USER, text, brainId)
+        if (result is BrainResult.Answer) record(TurnRole.ASSISTANT, result.text, brainId)
+        present(result, gen)
     }
 
     private suspend fun present(result: BrainResult, gen: Int) {
@@ -383,7 +422,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                             }
                             playPcm(pcm)
                         } else if (result.text.isNotBlank()) {
-                            speakAndWait(Spoken(result.text, accent, result.accent.label))
+                            speakAndWait(Spoken(result.text, accent, result.accent.label, result.brainId))
                         }
                         val follow = result.followUp
                         if (follow != null && gen == generation && !holding) {
@@ -395,11 +434,27 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                         liveActive = false
                     }
                 } else {
-                    speechQueue.send(Spoken(result.text, accent, result.accent.label))
+                    speakQueued(Spoken(result.text, accent, result.accent.label, result.brainId))
                 }
             }
-            is BrainResult.Failure -> showProblem(result.text.ifBlank { "Something went wrong." })
+            is BrainResult.Failure -> {
+                val message = result.text.ifBlank { "Something went wrong." }
+                speakQueued(
+                    Spoken(
+                        message,
+                        com.jarvis.core.brain.BrainAccent.OFFLINE.toOrb(),
+                        "Offline",
+                        result.brainId,
+                    ),
+                )
+            }
         }
+    }
+
+    private suspend fun speakQueued(spoken: Spoken) {
+        val done = CompletableDeferred<Unit>()
+        speechQueue.send(SpeechItem(spoken, done))
+        done.await()
     }
 
     private suspend fun playPcm(pcm: ByteArray) {
@@ -517,6 +572,10 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private suspend fun speakAndWait(spoken: Spoken) {
+        Log.i(
+            VOICE,
+            "tts speak brain=${spoken.brainId} chars=${spoken.text.length} preview=${spokenPreview(spoken.text)}",
+        )
         _ui.update {
             it.copy(
                 orb = OrbState.SPEAKING,
@@ -544,7 +603,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 }
                 suspendCancellableCoroutine { continuation ->
-                    speaker.speak(spoken.text) {
+                    speaker.speak(spoken.text, spoken.brainId) {
                         if (continuation.isActive) continuation.resume(Unit)
                     }
                     continuation.invokeOnCancellation { speaker.stop() }
@@ -609,7 +668,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun drainQueue() {
         while (true) {
-            speechQueue.tryReceive().getOrNull() ?: break
+            val item = speechQueue.tryReceive().getOrNull() ?: break
+            if (!item.done.isCompleted) item.done.complete(Unit)
         }
     }
 
@@ -681,6 +741,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     override fun onCleared() {
+        app.onVoiceUtterance = null
+        utteranceJob?.cancel()
         if (captureOpen) utteranceMic.stop()
         captureOpen = false
         abandonLive()
@@ -690,6 +752,15 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private companion object {
+        const val VOICE = "JarvisVoice"
         const val MAX_UTTERANCE_BYTES = 60 * 16_000 * 2
+
+        fun spokenPreview(text: String): String {
+            return text.replace('\n', ' ')
+                .replace(Regex("""gsk_[A-Za-z0-9_\-]+"""), "gsk_[redacted]")
+                .replace(Regex("""Bearer\s+\S+""", RegexOption.IGNORE_CASE), "Bearer [redacted]")
+                .replace(Regex("""ya29\.[A-Za-z0-9_\-.]+"""), "ya29.[redacted]")
+                .take(80)
+        }
     }
 }
