@@ -7,6 +7,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import com.jarvis.audio.JarvisTts
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -35,7 +36,11 @@ internal object FallbackSpeaker {
                         return@post
                     }
                     val arabic = text.any { it in '\u0600'..'\u06FF' }
-                    tts.language = if (arabic) Locale.forLanguageTag("ar") else Locale.US
+                    if (arabic) {
+                        tts.language = Locale.forLanguageTag("ar")
+                    } else {
+                        JarvisTts.applyEnglish(tts)
+                    }
                     tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                         override fun onStart(utteranceId: String?) = Unit
                         override fun onDone(utteranceId: String?) = finish()

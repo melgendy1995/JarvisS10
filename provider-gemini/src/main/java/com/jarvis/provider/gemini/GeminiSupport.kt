@@ -13,7 +13,9 @@ import com.google.firebase.ai.type.AudioTranscriptionConfig
 import com.google.firebase.ai.type.ContextWindowCompressionConfig
 import com.google.firebase.ai.type.GenerativeBackend
 import com.google.firebase.ai.type.ResponseModality
+import com.google.firebase.ai.type.SpeechConfig
 import com.google.firebase.ai.type.Tool
+import com.google.firebase.ai.type.Voice
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.liveGenerationConfig
 import com.jarvis.core.brain.BrainError
@@ -53,6 +55,8 @@ internal object GeminiModels {
         model,
         liveGenerationConfig {
             responseModality = ResponseModality.AUDIO
+            // SDK writes speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName.
+            speechConfig = SpeechConfig(Voice(ModelConfig.LIVE_VOICE))
             inputAudioTranscription = AudioTranscriptionConfig()
             outputAudioTranscription = AudioTranscriptionConfig()
             contextWindowCompression = ContextWindowCompressionConfig()

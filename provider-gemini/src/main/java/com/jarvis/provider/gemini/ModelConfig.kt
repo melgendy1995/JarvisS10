@@ -15,6 +15,12 @@ object ModelConfig {
     const val INPUT_SAMPLE_RATE_HZ = 16_000
     const val OUTPUT_SAMPLE_RATE_HZ = 24_000
 
+    /**
+     * Prebuilt Gemini Live voice. Charon is the deep male.
+     * This is the only place that name is chosen.
+     */
+    const val LIVE_VOICE = "Charon"
+
     /** Stop opening Live after this many turns in one Pacific day. Text Gemini still runs. */
     const val DAILY_LIVE_TURN_CAP = 40
 

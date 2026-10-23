@@ -110,7 +110,10 @@ class GeminiLiveBrain(
     }
 
     private suspend fun oneSession(request: BrainRequest, modelName: String): BrainResult {
-        Log.i(TAG, "live begin model=$modelName backend=${GeminiModels.BACKEND} modality=AUDIO")
+        Log.i(
+            TAG,
+            "live begin model=$modelName backend=${GeminiModels.BACKEND} modality=AUDIO voice=${ModelConfig.LIVE_VOICE}",
+        )
         openSession?.close()
         val system = PromptFitter().memorySystem(
             baseSystem = ModelConfig.SYSTEM_PROMPT,
@@ -459,8 +462,12 @@ private class GeminiLiveSession(
             runCatching { previous.stopReceiving() }
             runCatching { previous.close() }
         }
+        Log.i(TAG, "live voice requested=${ModelConfig.LIVE_VOICE} model=$modelName")
         val opened = openSocket(model)
-        Log.i(TAG, "live setup acknowledged model=$modelName backend=${GeminiModels.BACKEND} modality=AUDIO")
+        Log.i(
+            TAG,
+            "live setup acknowledged model=$modelName backend=${GeminiModels.BACKEND} modality=AUDIO voice=${ModelConfig.LIVE_VOICE}",
+        )
         connected = true
         mutex.withLock { session = opened }
         receiveJob = scope.launch receiveLoop@{
@@ -487,7 +494,10 @@ private class GeminiLiveSession(
         }
         if (resend) {
             try {
-                opened.send(utterance)
+                // Native-audio Live rejects clientContent with close 1007. Realtime text is
+                // the supported turn. An activity-end frame by itself is also rejected.
+                Log.i(TAG, "live send realtime text model=$modelName")
+                opened.sendTextRealtime(utterance)
             } catch (cancelled: CancellationException) {
                 val detail = closeDetailQuiet(opened)
                 lastDetail = detail
@@ -603,7 +613,9 @@ private suspend fun liveCloseDetail(session: LiveSession?): String {
         val message = reason.javaClass.methods
             .firstOrNull { it.name == "getMessage" && it.parameterCount == 0 }
             ?.invoke(reason) as? String
-        "code=$code message=${redact(message.orEmpty())}"
+        val detail = "code=$code message=${redact(message.orEmpty())}"
+        Log.w(TAG, "live close $detail")
+        detail
     } catch (cancelled: CancellationException) {
         if (!currentCoroutineContext().isActive) throw cancelled
         "close reason cancelled"

@@ -10,32 +10,81 @@ import android.util.Log
 import java.util.Locale
 
 class JarvisSpeaker(context: Context) {
+    private val appContext = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
-    private val tts: TextToSpeech
+    private var tts: TextToSpeech? = null
+    private var probe: TextToSpeech? = null
     private var ready = false
     private var failed = false
+    private var closed = false
     private var pending: Pending? = null
     private var onDone: (() -> Unit)? = null
     private var activeUtterance: String? = null
     private var activeBrain: String = ""
 
     init {
-        tts = TextToSpeech(context.applicationContext) { status ->
-            main.post {
-                if (status == TextToSpeech.SUCCESS) {
-                    ready = true
-                    tts.setSpeechRate(1.02f)
-                    tts.language = Locale.US
-                    pending?.let { item ->
-                        pending = null
-                        start(item.text, item.brainId, item.onDone)
-                    }
-                } else {
-                    failed = true
-                    pending?.onDone?.invoke()
-                    pending = null
-                }
-            }
+        val initial = TextToSpeech(appContext) { status ->
+            main.post { onInitial(status) }
+        }
+        tts = initial
+    }
+
+    private fun onInitial(status: Int) {
+        if (closed) return
+        val initial = tts
+        if (status != TextToSpeech.SUCCESS || initial == null) {
+            failed = true
+            pending?.onDone?.invoke()
+            pending = null
+            return
+        }
+        val googleInstalled = initial.engines.orEmpty().any { it.name == GOOGLE_TTS }
+        if (!JarvisTts.hasOfflineBritish(initial) && googleInstalled) {
+            Log.i(JarvisTts.TAG, "probing $GOOGLE_TTS for an offline en-GB voice")
+            probe = TextToSpeech(appContext, { probeStatus ->
+                main.post { onProbe(initial, probeStatus) }
+            }, GOOGLE_TTS)
+            return
+        }
+        becomeReady(initial)
+    }
+
+    private fun onProbe(initial: TextToSpeech, status: Int) {
+        val probed = probe
+        probe = null
+        if (closed) {
+            runCatching { initial.shutdown() }
+            runCatching { probed?.shutdown() }
+            return
+        }
+        if (status == TextToSpeech.SUCCESS && probed != null && JarvisTts.hasOfflineBritish(probed)) {
+            Log.i(JarvisTts.TAG, "selected engine=$GOOGLE_TTS")
+            runCatching { initial.shutdown() }
+            becomeReady(probed)
+            return
+        }
+        val availability = probed?.isLanguageAvailable(Locale.UK)
+        val missing = availability == TextToSpeech.LANG_MISSING_DATA
+        val names = probed?.let { EnglishVoices.enGbNames(JarvisTts.snapshot(it)) }.orEmpty()
+        Log.i(
+            JarvisTts.TAG,
+            "google en-GB voices=$names missingData=$missing availability=$availability",
+        )
+        runCatching { probed?.shutdown() }
+        Log.i(JarvisTts.TAG, "selected engine=${initial.defaultEngine}")
+        becomeReady(initial)
+    }
+
+    private fun becomeReady(engine: TextToSpeech) {
+        tts = engine
+        ready = true
+        // Idle default stays the previous rate until an English line applies JarvisTts.
+        engine.setPitch(1.0f)
+        engine.setSpeechRate(1.02f)
+        engine.language = Locale.US
+        pending?.let { item ->
+            pending = null
+            start(item.text, item.brainId, item.onDone)
         }
     }
 
@@ -57,26 +106,36 @@ class JarvisSpeaker(context: Context) {
 
     fun stop() {
         main.post {
-            runCatching { tts.stop() }
+            runCatching { tts?.stop() }
             deliverDone()
         }
     }
 
     fun shutdown() {
         main.post {
+            closed = true
             deliverDone()
             pending?.onDone?.invoke()
             pending = null
-            runCatching { tts.shutdown() }
+            runCatching { tts?.shutdown() }
+            runCatching { probe?.shutdown() }
+            probe = null
         }
     }
 
     private fun start(text: String, brainId: String, done: () -> Unit) {
+        val tts = tts ?: return done()
         deliverDone()
         onDone = done
         activeBrain = brainId
         val arabic = text.any { it in '\u0600'..'\u06FF' }
-        tts.language = if (arabic) Locale.forLanguageTag("ar") else Locale.US
+        if (arabic) {
+            tts.language = Locale.forLanguageTag("ar")
+            tts.setPitch(1.0f)
+            tts.setSpeechRate(1.02f)
+        } else {
+            JarvisTts.applyEnglish(tts)
+        }
         val utteranceId = "jarvis-${System.nanoTime()}"
         activeUtterance = utteranceId
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
@@ -118,5 +177,6 @@ class JarvisSpeaker(context: Context) {
 
     private companion object {
         const val TAG = "JarvisVoice"
+        const val GOOGLE_TTS = "com.google.android.tts"
     }
 }
