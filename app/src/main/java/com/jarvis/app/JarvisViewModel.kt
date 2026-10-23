@@ -16,7 +16,11 @@ import com.jarvis.core.brain.BrainResult
 import com.jarvis.core.brain.ConversationTurn
 import com.jarvis.core.brain.LiveEvent
 import com.jarvis.core.brain.LiveFollowUp
+import com.jarvis.core.brain.MemoryFact
 import com.jarvis.core.brain.Speaker
+import com.jarvis.data.Channels
+import com.jarvis.data.SummaryText
+import com.jarvis.data.TurnRole
 import com.jarvis.orb.BrainAccent
 import com.jarvis.orb.OrbState
 import com.jarvis.provider.gemini.ModelConfig
@@ -52,6 +56,9 @@ data class JarvisUiState(
     val groqProxyReady: Boolean = false,
     val groqBearerSaved: Boolean = false,
     val groqKeystoreReady: Boolean = true,
+    val personaOpen: Boolean = false,
+    val personaName: String = "Mahmoud",
+    val personaText: String = "",
 )
 
 sealed interface JarvisEvent {
@@ -83,13 +90,13 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private var pendingPermission: String? = null
     private var mic: PcmMic? = null
     private var activeFollowUp: LiveFollowUp? = null
-    private val history = ArrayDeque<ConversationTurn>()
     private val utteranceMic = PcmMic(ModelConfig.INPUT_SAMPLE_RATE_HZ)
     private val utterancePcm = ByteArrayOutputStream()
     private val pcmLock = Any()
     private var captureOpen = false
     private var pendingPcm = ByteArray(0)
     private var sttFailure = ""
+    private var lastBrainId = "phone"
 
     @Volatile private var liveActive = false
 
@@ -192,10 +199,36 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         _ui.update {
             it.copy(
                 groqSettings = true,
+                personaOpen = false,
                 groqProxyReady = app.groqProxyConfigured(),
                 groqBearerSaved = app.groqBearerSaved(),
                 groqKeystoreReady = app.groqKeystoreOpen(),
             )
+        }
+    }
+
+    fun openPersona() {
+        viewModelScope.launch {
+            val profile = app.memory.profile()
+            _ui.update {
+                it.copy(
+                    personaOpen = true,
+                    groqSettings = false,
+                    personaName = profile.name,
+                    personaText = profile.persona,
+                )
+            }
+        }
+    }
+
+    fun closePersona() {
+        _ui.update { it.copy(personaOpen = false) }
+    }
+
+    fun savePersona(text: String) {
+        viewModelScope.launch {
+            app.memory.savePersona(text)
+            _ui.update { it.copy(personaOpen = false, personaText = text) }
         }
     }
 
@@ -303,7 +336,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
         routeJob = viewModelScope.launch {
             val result = try {
-                app.chain.reply(BrainRequest(utterance = text, turns = history.toList()))
+                app.chain.reply(brainRequest(text))
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -317,8 +350,13 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 (result as? BrainResult.Answer)?.followUp?.close()
                 return@launch
             }
-            rememberUser(text)
-            if (result is BrainResult.Answer) rememberAssistant(result.text)
+            val brainId = when (result) {
+                is BrainResult.Answer -> result.brainId
+                is BrainResult.Failure -> result.brainId
+            }
+            lastBrainId = brainId
+            record(TurnRole.USER, text, brainId)
+            if (result is BrainResult.Answer) record(TurnRole.ASSISTANT, result.text, brainId)
             present(result, gen)
         }
     }
@@ -449,7 +487,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                         }
                     }
                     LiveEvent.TurnComplete -> {
-                        rememberAssistant(_ui.value.reply)
+                        record(TurnRole.ASSISTANT, _ui.value.reply, lastBrainId)
                         withContext(Dispatchers.IO) { speaker.drain(1_500) }
                         capture.muted = false
                         listening = true
@@ -606,23 +644,33 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun rememberUser(text: String) {
-        val line = text.trim()
-        if (line.isEmpty()) return
-        history.addLast(ConversationTurn(Speaker.USER, line))
-        trimHistory()
+    private suspend fun brainRequest(text: String): BrainRequest {
+        val snap = app.memory.snapshot(Channels.VOICE)
+        return BrainRequest(
+            utterance = text,
+            turns = snap.turns.map { turn ->
+                ConversationTurn(
+                    speaker = if (turn.role == TurnRole.USER) Speaker.USER else Speaker.ASSISTANT,
+                    text = turn.text,
+                )
+            },
+            persona = snap.persona,
+            facts = snap.facts.map { MemoryFact(it.key, it.value, it.pinned) },
+            summary = snap.summary,
+        )
     }
 
-    private fun rememberAssistant(text: String) {
+    private suspend fun record(role: String, text: String, brainId: String) {
         val line = text.trim()
         if (line.isEmpty()) return
-        if (history.lastOrNull()?.text == line) return
-        history.addLast(ConversationTurn(Speaker.ASSISTANT, line))
-        trimHistory()
-    }
-
-    private fun trimHistory() {
-        while (history.size > MAX_HISTORY) history.removeFirst()
+        val outcome = app.memory.appendTurn(role, line, brainId, Channels.VOICE)
+        if (!outcome.askCloud || outcome.localSummary.isBlank()) return
+        val stamp = outcome.summaryUpdatedAt
+        val prompt = SummaryText.cloudPrompt(outcome.localSummary)
+        viewModelScope.launch {
+            val rewritten = app.rewriteSummary(prompt)
+            if (!rewritten.isNullOrBlank()) app.memory.replaceSummary(stamp, rewritten)
+        }
     }
 
     override fun onCleared() {
@@ -635,7 +683,6 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private companion object {
-        const val MAX_HISTORY = 12
         const val MAX_UTTERANCE_BYTES = 60 * 16_000 * 2
     }
 }

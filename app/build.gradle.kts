@@ -49,6 +49,7 @@ kotlin {
 
 dependencies {
     implementation(project(":core"))
+    implementation(project(":data"))
     implementation(project(":orb"))
     implementation(project(":audio"))
     implementation(project(":provider-gemini"))

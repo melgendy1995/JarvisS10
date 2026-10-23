@@ -6,10 +6,15 @@ import com.jarvis.app.system.AppTimerScheduler
 import com.jarvis.app.system.CameraTorchController
 import com.jarvis.core.CommandRouter
 import com.jarvis.core.brain.BrainChain
+import com.jarvis.core.brain.BrainResult
 import com.jarvis.core.skills.FlashlightSkill
+import com.jarvis.core.skills.MemorySkill
 import com.jarvis.core.skills.SkillRegistry
 import com.jarvis.core.skills.TimeSkill
 import com.jarvis.core.skills.TimerSkill
+import com.jarvis.data.JarvisDatabase
+import com.jarvis.data.MemoryLimits
+import com.jarvis.data.MemoryRepository
 import com.jarvis.provider.gemini.GeminiCooldown
 import com.jarvis.provider.gemini.GeminiFirebase
 import com.jarvis.provider.gemini.GeminiLiveBrain
@@ -28,6 +33,7 @@ import com.jarvis.provider.groq.KeystoreBearerStore
 import com.jarvis.provider.groq.SharedPrefsGroqStore
 import com.jarvis.provider.groq.SystemGroqClock
 import com.jarvis.provider.groq.groqTransport
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -42,6 +48,9 @@ class JarvisApplication : Application() {
     lateinit var chain: BrainChain
         private set
 
+    lateinit var memory: MemoryRepository
+        private set
+
     lateinit var timers: AppTimerScheduler
         private set
 
@@ -50,6 +59,7 @@ class JarvisApplication : Application() {
 
     private lateinit var bearerStore: KeystoreBearerStore
     private lateinit var groqBrain: GroqBrain
+    private lateinit var geminiText: GeminiTextBrain
     private lateinit var network: NetworkStatus
     private lateinit var geminiCooldown: GeminiCooldown
     private var firebaseReady = false
@@ -59,10 +69,12 @@ class JarvisApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         timers = AppTimerScheduler(this, announcements)
+        memory = MemoryRepository(JarvisDatabase.create(this).memoryDao())
         val registry = SkillRegistry()
         registry.register(TimeSkill())
         registry.register(TimerSkill(timers))
         registry.register(FlashlightSkill(CameraTorchController(this)))
+        registry.register(MemorySkill(RoomMemory(memory)))
         router = CommandRouter(registry)
         firebaseReady = GeminiFirebase.install(this)
         val usage = UsageCounter(SystemTimeSource, SharedPrefsUsageStore(this))
@@ -90,6 +102,13 @@ class JarvisApplication : Application() {
             log = groqLog,
         )
         val configured = { firebaseReady || GeminiFirebase.isReady() }
+        geminiText = GeminiTextBrain(
+            configured = configured,
+            online = network::isOnline,
+            cooldown = geminiCooldown,
+            usage = usage,
+            registry = registry,
+        )
         chain = BrainChain(
             router,
             listOf(
@@ -101,16 +120,30 @@ class JarvisApplication : Application() {
                     usage = usage,
                     registry = registry,
                 ),
-                GeminiTextBrain(
-                    configured = configured,
-                    online = network::isOnline,
-                    cooldown = geminiCooldown,
-                    usage = usage,
-                    registry = registry,
-                ),
+                geminiText,
                 groqBrain,
             ),
         )
+    }
+
+    /**
+     * Rewrites a summary with whichever configured text brain can answer.
+     * Live audio is not used. A miss leaves the local truncation in Room.
+     */
+    suspend fun rewriteSummary(prompt: String): String? {
+        if (prompt.isBlank()) return null
+        return try {
+            summaryText(geminiText.summarize(prompt)) ?: summaryText(groqBrain.summarize(prompt))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun summaryText(result: BrainResult): String? {
+        val answer = result as? BrainResult.Answer ?: return null
+        return answer.text.trim().take(MemoryLimits.SUMMARY_CHARS).takeIf { it.isNotEmpty() }
     }
 
     fun groqProxyConfigured(): Boolean = GroqProxy.normalize(GroqBuildConfig.GROQ_PROXY_URL) != null

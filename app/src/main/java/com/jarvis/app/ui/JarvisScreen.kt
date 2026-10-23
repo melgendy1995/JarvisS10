@@ -83,7 +83,12 @@ fun JarvisScreen(viewModel: JarvisViewModel) {
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Spacer(Modifier.weight(1f))
-            StateLabel(ui.orb, ui.accent, onOpenSettings = viewModel::openGroqSettings)
+            StateLabel(
+                phase = ui.orb,
+                accent = ui.accent,
+                onOpenSettings = viewModel::openGroqSettings,
+                onOpenPersona = viewModel::openPersona,
+            )
             Spacer(Modifier.height(12.dp))
             Captions(
                 you = ui.you,
@@ -101,7 +106,16 @@ fun JarvisScreen(viewModel: JarvisViewModel) {
                     .height(220.dp),
             )
         }
-        if (ui.groqSettings) {
+        if (ui.personaOpen) {
+            Box(Modifier.fillMaxSize().background(Color.Black)) {
+                PersonaEditor(
+                    name = ui.personaName,
+                    initialPersona = ui.personaText,
+                    onSave = viewModel::savePersona,
+                    onClose = viewModel::closePersona,
+                )
+            }
+        } else if (ui.groqSettings) {
             Box(Modifier.fillMaxSize().background(Color.Black)) {
                 GroqSettings(
                     proxyReady = ui.groqProxyReady,
@@ -116,7 +130,12 @@ fun JarvisScreen(viewModel: JarvisViewModel) {
 }
 
 @Composable
-private fun StateLabel(phase: OrbState, accent: BrainAccent, onOpenSettings: () -> Unit) {
+private fun StateLabel(
+    phase: OrbState,
+    accent: BrainAccent,
+    onOpenSettings: () -> Unit,
+    onOpenPersona: () -> Unit,
+) {
     val transition = rememberInfiniteTransition(label = "drift")
     val driftX by transition.animateFloat(
         initialValue = -8f,
@@ -137,19 +156,36 @@ private fun StateLabel(phase: OrbState, accent: BrainAccent, onOpenSettings: () 
         label = "driftY",
     )
     val color = Color(accent.red, accent.green, accent.blue)
-    Text(
-        text = if (phase == OrbState.ERROR) "OFFLINE" else phase.name,
-        modifier = Modifier
-            .offset(x = driftX.dp, y = driftY.dp)
-            .semantics { contentDescription = "Groq settings" }
-            .pointerInput(onOpenSettings) {
-                detectTapGestures(onLongPress = { onOpenSettings() })
-            },
-        color = color.copy(alpha = 0.55f),
-        fontSize = 13.sp,
-        fontWeight = FontWeight.Light,
-        letterSpacing = 6.sp,
-    )
+    Column(
+        modifier = Modifier.offset(x = driftX.dp, y = driftY.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = if (phase == OrbState.ERROR) "OFFLINE" else phase.name,
+            modifier = Modifier
+                .semantics { contentDescription = "Groq settings" }
+                .pointerInput(onOpenSettings) {
+                    detectTapGestures(onLongPress = { onOpenSettings() })
+                },
+            color = color.copy(alpha = 0.55f),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Light,
+            letterSpacing = 6.sp,
+        )
+        Text(
+            text = "ABOUT",
+            modifier = Modifier
+                .padding(top = 8.dp)
+                .semantics { contentDescription = "About Mahmoud" }
+                .pointerInput(onOpenPersona) {
+                    detectTapGestures(onTap = { onOpenPersona() })
+                },
+            color = color.copy(alpha = 0.35f),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Light,
+            letterSpacing = 3.sp,
+        )
+    }
 }
 
 @Composable
