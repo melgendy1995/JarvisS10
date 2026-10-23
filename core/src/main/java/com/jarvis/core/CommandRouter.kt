@@ -24,5 +24,8 @@ class CommandRouter(
             text = "No brain yet. I can tell the time, set a timer, or toggle the flashlight.",
             success = false,
         )
+
+        /** True only for the miss sentinel [route] returns when no skill claims the text. */
+        fun isMiss(result: SkillResult): Boolean = result === NO_BRAIN
     }
 }
