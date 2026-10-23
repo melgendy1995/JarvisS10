@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>JARVIS UI prototype</title>
+<style>
+:root{--cyan:#3fd8ff;--blue:#2a6cff;--dim:#5d7186;--txt:#9fb4c8;--accent:#3fd8ff}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;background:#000;overflow:hidden;color:var(--txt);
+font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+#gl,#c2d{position:fixed;inset:0;width:100%;height:100%;display:block}
+#hud{position:fixed;inset:0;pointer-events:none;animation:drift 240s ease-in-out infinite}
+@keyframes drift{0%{transform:translate(0,0)}25%{transform:translate(6px,-4px)}50%{transform:translate(-5px,5px)}75%{transform:translate(4px,6px)}100%{transform:translate(0,0)}}
+#strip{position:absolute;top:22px;left:40px;right:40px;display:flex;gap:28px;align-items:center;
+font-size:20px;letter-spacing:.06em;color:var(--dim);opacity:.75}
+#strip .sp{flex:1}
+#mark{font-weight:300;letter-spacing:.55em;font-size:18px;color:#3a5266}
+.pill{display:inline-flex;align-items:center;gap:10px;padding:4px 14px;border:1px solid #1d2a36;border-radius:999px}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent);transition:background .8s,box-shadow .8s}
+#cam{color:#b0465a;display:inline-flex;align-items:center;gap:8px}
+#cam .dot{background:#ff3b5c;box-shadow:0 0 8px #ff3b5c;animation:blink 2s infinite}
+@keyframes blink{50%{opacity:.25}}
+#state{position:absolute;left:50%;bottom:150px;transform:translateX(-50%);font-size:16px;letter-spacing:.5em;
+text-transform:uppercase;color:var(--accent);opacity:.55;transition:color .8s}
+#cap{position:absolute;left:12%;right:12%;bottom:62px;text-align:center;font-size:30px;font-weight:300;line-height:1.35;
+color:#b9cad9;opacity:.8;transition:opacity .6s;min-height:42px}
+#cap .you{color:#6f8598}#cap .ai{color:#cfe6f5}
+#ui{position:fixed;right:24px;bottom:24px;display:flex;flex-direction:column;gap:8px;z-index:5;
+background:rgba(8,14,20,.75);border:1px solid #1b2732;border-radius:14px;padding:12px;font-size:14px}
+#ui .row{display:flex;gap:6px;flex-wrap:wrap}
+#ui button{background:#0d1620;color:#9fb4c8;border:1px solid #23313e;border-radius:8px;padding:6px 10px;font:inherit;cursor:pointer}
+#ui button.on{border-color:var(--accent);color:#e6f6ff}
+#ui label{color:#5d7186;font-size:12px;letter-spacing:.1em}
+body.shot #ui{display:none}
+#fps{position:fixed;left:8px;bottom:6px;font-size:11px;color:#2a3946}
+body.shot #fps{display:none}
+</style></head>
+<body>
+<canvas id="gl"></canvas>
+<div id="hud">
+  <div id="strip">
+    <span id="mark">JARVIS</span>
+    <span class="sp"></span>
+    <span id="cam"><span class="dot"></span>CAM LIVE</span>
+    <span class="pill"><span class="dot" id="bdot"></span><span id="brain">PHONE</span></span>
+    <span id="wx">Riyadh 31°</span>
+    <span id="wifi">Wi-Fi ▂▄▆</span>
+    <span id="bat">85%</span>
+    <span id="clock">--:--</span>
+  </div>
+  <div id="state">idle</div>
+  <div id="cap"></div>
+</div>
+<div id="ui">
+  <label>STATE</label>
+  <div class="row" id="states"></div>
+  <label>BRAIN</label>
+  <div class="row" id="brains"></div>
+  <label>QUALITY / AUDIO</label>
+  <div class="row"><button data-q="low">low</button><button data-q="med">med</button><button data-q="high">high</button>
+  <button id="mic">Use mic</button><button id="say">Speak demo</button></div>
+</div>
+<div id="fps"></div>
+<script>
+(()=>{
+"use strict";
+const P=new URLSearchParams(location.search);
+const SHOT=P.get('shot')==='1', DEMO=P.get('demo')==='1';
+let Q=(P.get('q')||'med'); if(!['low','med','high'].includes(Q))Q='med';
+if(SHOT)document.body.classList.add('shot');
+const COUNTS={low:1500,med:3000,high:6000};
+const STATES=['idle','listening','thinking','speaking','error'];
+const BRAINS={phone:[0.25,0.85,1.0],gemini:[0.55,0.45,1.0],groq:[1.0,0.62,0.25],offline:[0.45,0.5,0.55]};
+const BRAIN_HEX={phone:'#3fd8ff',gemini:'#8c73ff',groq:'#ff9e40',offline:'#73808c'};
+// per-state targets: bright, radius, swirl, speed, noise, scatter, audioGain, colorMix(0=base cyan,1=brain accent), pointSize
+const S={
+ idle:     {fl:0,tr:1,tg:1,tb:1,b:.38,r:1.0, sw:.15,sp:.25,n:.10,sc:0,  ag:0,   cm:.25,ps:1.0},
+ listening:{fl:0,tr:.9,tg:1.05,tb:1.1,b:.95,r:1.05,sw:.25,sp:.6, n:.16,sc:0,  ag:1.0, cm:.35,ps:1.15},
+ thinking: {fl:.6,tr:1.5,tg:.85,tb:1.15,b:1.0,r:.92, sw:1.6,sp:1.6,n:.32,sc:0,  ag:.2,  cm:.9, ps:1.0},
+ speaking: {fl:.15,tr:1.1,tg:1.05,tb:1.0,b:1.05,r:1.0, sw:.35,sp:.8, n:.14,sc:0,  ag:1.3, cm:.55,ps:1.2},
+ error:    {fl:0,tr:.7,tg:.7,tb:.75,b:.30,r:1.0, sw:.05,sp:.15,n:.05,sc:1,  ag:0,   cm:0,  ps:.9}
+};
+const CAPS={
+ idle:['','Say "hey jarvis"'],
+ listening:['what\u2019s the weather tomorrow and set a timer for','\u2026'],
+ thinking:['what\u2019s the weather tomorrow and set a timer for ten minutes',''],
+ speaking:['','Tomorrow looks clear, 33 degrees. Your ten minute timer is running.'],
+ error:['','Offline. Timers, alarms and the clock still work.']
+};
+let state='idle', brain='phone';
+const cur=Object.assign({},S.idle), tgt=Object.assign({},S.idle);
+let col=[...BRAINS.phone], colT=[...BRAINS.phone];
+
+// ---------- audio ----------
+let analyser=null, fbuf=null, micOn=false, ttsT0=-1;
+async function enableMic(){
+  try{
+    const st=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});
+    const ac=new (window.AudioContext||window.webkitAudioContext)();
+    const src=ac.createMediaStreamSource(st); analyser=ac.createAnalyser(); analyser.fftSize=256;
+    analyser.smoothingTimeConstant=.6; src.connect(analyser); fbuf=new Uint8Array(analyser.frequencyBinCount); micOn=true;
+    document.getElementById('mic').classList.add('on');
+  }catch(e){micOn=false;}
+}
+function simVoice(t){ // speech-like: syllables ~4-6 Hz, phrase gaps
+  const phrase=(Math.sin(t*0.9)+Math.sin(t*0.37+1))>-0.6?1:0.1;
+  const syl=Math.pow(Math.max(0,Math.sin(t*Math.PI*4.7)*.6+Math.sin(t*Math.PI*2.9+.7)*.4),1.6);
+  return Math.min(1,phrase*(0.15+syl*0.85));
+}
+function levels(t){ // returns [level, low, high]
+  if(micOn&&analyser&&state==='listening'){
+    analyser.getByteFrequencyData(fbuf); let lo=0,hi=0,n=fbuf.length;
+    for(let i=0;i<n;i++){ if(i<n/4)lo+=fbuf[i]; else hi+=fbuf[i]; }
+    lo/=(n/4)*255; hi/=(n*3/4)*255; return [Math.min(1,(lo*.7+hi*.3)*2.2),lo,hi];
+  }
+  if(state==='speaking'||state==='listening'){
+    const v=simVoice(t+(state==='listening'?3.3:0)); return [v, v*.8, Math.max(0,simVoice(t*1.3+2)-.2)];
+  }
+  return [0,0,0];
+}
+
+// ---------- WebGL ----------
+const cv=document.getElementById('gl');
+const gl=cv.getContext('webgl',{antialias:false,alpha:false,premultipliedAlpha:false,powerPreference:'high-performance'});
+let prog,uni={},N=0,buf;
+const VS=`
+attribute vec4 a; // xyz unit-sphere dir * shell radius, w = random
+uniform float uT,uR,uSw,uN,uSc,uLvl,uLo,uHi,uPs,uAsp,uDpr,uB,uBloom,uFlat;
+varying float vA; varying float vH;
+vec3 hash3(float n){return fract(sin(vec3(n,n+1.7,n+3.1))*43758.5453);}
+vec3 field(vec3 p,float t){ // cheap divergence-ish swirl field (sum of rotated sines)
+  return vec3(sin(p.y*2.1+t)+sin(p.z*3.3-t*.7),
+              sin(p.z*1.9-t*.8)+sin(p.x*2.7+t*.5),
+              sin(p.x*2.3+t*.6)+sin(p.y*3.1-t*.9))*.5;
+}
+void main(){
+  vec3 p=a.xyz; float r=a.w;
+  float t=uT;
+  // swirl: rotate around Y by angle depending on height and radius
+  float ang=t*(0.10+uSw*0.30)*(0.7+0.6*r)+uSw*(1.6-abs(p.y))*length(p.xz)*1.4;
+  p.y*=1.0-uFlat*(0.55+0.25*r);
+  float c=cos(ang),s=sin(ang); p.xz=mat2(c,-s,s,c)*p.xz;
+  float tilt=0.35+0.1*sin(t*.05); float ct=cos(tilt),st=sin(tilt); p.yz=mat2(ct,-st,st,ct)*p.yz;
+  // breathing
+  float breathe=1.0+0.035*sin(t*0.9)+0.015*sin(t*2.3+r*6.0);
+  // noise displacement
+  p+=field(p*1.4+r,t*(0.6+uSw))*uN;
+  // audio: ripple band by latitude + radial push
+  float band=sin(p.y*7.0-t*6.0)*0.5+0.5;
+  float push=uLvl*(0.10+0.22*band*uLo+0.18*uHi*r);
+  p*=uR*breathe*(1.0+push);
+  // scatter for error/offline
+  vec3 h=hash3(r*991.0)*2.0-1.0;
+  p+=h*uSc*(0.9+0.4*sin(t*.2+r*10.0));
+  // perspective
+  float z=p.z+3.2;
+  vec2 sp=p.xy/(z*0.42);
+  sp.x/=uAsp;
+  gl_Position=vec4(sp*0.70+vec2(0.0,0.07),0.0,1.0);
+  float depth=clamp((4.4-z)/2.4,0.0,1.0);
+  gl_PointSize=uDpr*uPs*(2.2+6.0*depth)*(1.0+uLvl*0.7*band)*(1.0+uBloom*4.0);
+  vA=uB*(0.35+0.9*depth)*(0.5+0.5*fract(r*13.7))*(1.0+uLvl*1.1*band)*(1.0-uBloom*0.93);
+  vH=band*uLvl+r*0.3;
+}`;
+const FS=`precision mediump float;
+uniform vec3 uC; uniform vec3 uBase; uniform float uCm; uniform vec3 uTint;
+varying float vA; varying float vH;
+void main(){
+  vec2 d=gl_PointCoord-0.5; float q=dot(d,d)*4.0;
+  if(q>1.0)discard;
+  float g=exp(-q*3.2)+0.25*exp(-q*12.0);
+  vec3 c=mix(uBase,uC,clamp(uCm+vH*0.25,0.0,1.0))*uTint;
+  c=mix(c,vec3(0.85,0.95,1.0),0.18*exp(-q*14.0));
+  gl_FragColor=vec4(c*g*vA,1.0);
+}`;
+function sh(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));return s;}
+function build(){
+  N=COUNTS[Q]; const d=new Float32Array(N*4);
+  for(let i=0;i<N;i++){
+    // nebula: dense shell + inner haze + a few outliers
+    let u=Math.random()*2-1, th=Math.random()*Math.PI*2, s=Math.sqrt(1-u*u);
+    const k=Math.random(); let rad = k<0.62 ? 0.95+ (Math.random()-.5)*0.12 : k<0.92 ? Math.cbrt(Math.random())*0.85 : 1.1+Math.random()*0.5;
+    const dx=s*Math.cos(th),dy=u,dz=s*Math.sin(th);
+    rad*=1+0.16*Math.sin(dx*3.1+dy*2.3)*Math.sin(dz*2.7-dy*1.9)+0.06*Math.sin(dx*9+dz*7);
+    d[i*4]=s*Math.cos(th)*rad; d[i*4+1]=u*rad; d[i*4+2]=s*Math.sin(th)*rad; d[i*4+3]=Math.random();
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER,buf); gl.bufferData(gl.ARRAY_BUFFER,d,gl.STATIC_DRAW);
+}
+let useGL=!!gl;
+if(useGL){
+  try{
+    prog=gl.createProgram(); gl.attachShader(prog,sh(gl.VERTEX_SHADER,VS)); gl.attachShader(prog,sh(gl.FRAGMENT_SHADER,FS));
+    gl.linkProgram(prog); if(!gl.getProgramParameter(prog,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(prog));
+    gl.useProgram(prog);
+    ['uT','uR','uSw','uN','uSc','uLvl','uLo','uHi','uPs','uAsp','uDpr','uB','uC','uBase','uCm','uTint','uBloom','uFlat'].forEach(n=>uni[n]=gl.getUniformLocation(prog,n));
+    buf=gl.createBuffer(); build();
+    const loc=gl.getAttribLocation(prog,'a'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc,4,gl.FLOAT,false,0,0);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE); gl.disable(gl.DEPTH_TEST);
+  }catch(e){console.warn('WebGL failed, Canvas2D fallback',e); useGL=false;}
+}
+// Canvas2D fallback (fewer points)
+let c2=null, pts2=null;
+if(!useGL){
+  const c=document.createElement('canvas'); c.id='c2d'; cv.replaceWith(c); c2=c.getContext('2d');
+  pts2=[]; for(let i=0;i<Math.min(1200,COUNTS[Q]/2);i++){let u=Math.random()*2-1,th=Math.random()*6.283,s=Math.sqrt(1-u*u),r=.9+Math.random()*.15;
+    pts2.push([s*Math.cos(th)*r,u*r,s*Math.sin(th)*r,Math.random()]);}
+}
+let DPR=1,W=0,H=0;
+function resize(){
+  DPR=Math.min(window.devicePixelRatio||1, Q==='high'?2:Q==='med'?1.5:1);
+  const el=useGL?cv:document.getElementById('c2d');
+  W=el.width=Math.round(innerWidth*DPR); H=el.height=Math.round(innerHeight*DPR);
+  if(useGL)gl.viewport(0,0,W,H);
+}
+addEventListener('resize',resize); resize();
+
+// ---------- UI ----------
+const $=id=>document.getElementById(id);
+function setState(s,fromHash){
+  if(!STATES.includes(s))return; state=s; Object.assign(tgt,S[s]);
+  $('state').textContent=s==='error'?'offline':s;
+  if(s==='error')setBrain('offline',true); else if(brain==='offline')setBrain('phone',true);
+  const [you,ai]=CAPS[s]; $('cap').innerHTML=(you?`<span class="you">${you}</span>`:'')+(you&&ai?'<br>':'')+(ai?`<span class="ai">${ai}</span>`:'');
+  document.querySelectorAll('#states button').forEach(b=>b.classList.toggle('on',b.dataset.s===s));
+  if(!fromHash&&!DEMO)history.replaceState(null,'',location.pathname+location.search+'#'+s);
+  if(s==='speaking')ttsT0=performance.now();
+}
+function setBrain(b,quiet){
+  brain=b; colT=[...BRAINS[b]];
+  document.documentElement.style.setProperty('--accent',BRAIN_HEX[b]);
+  $('brain').textContent=b.toUpperCase();
+  document.querySelectorAll('#brains button').forEach(x=>x.classList.toggle('on',x.dataset.b===b));
+}
+STATES.forEach(s=>{const b=document.createElement('button');b.textContent=s;b.dataset.s=s;b.onclick=()=>setState(s);$('states').appendChild(b);});
+Object.keys(BRAINS).forEach(k=>{const b=document.createElement('button');b.textContent=k;b.dataset.b=k;b.onclick=()=>setBrain(k);$('brains').appendChild(b);});
+document.querySelectorAll('[data-q]').forEach(b=>{b.classList.toggle('on',b.dataset.q===Q);b.onclick=()=>{Q=b.dataset.q;
+  document.querySelectorAll('[data-q]').forEach(x=>x.classList.toggle('on',x.dataset.q===Q)); if(useGL)build(); resize();};});
+$('mic').onclick=()=>{enableMic(); setState('listening');};
+$('say').onclick=()=>{
+  setState('speaking');
+  try{const u=new SpeechSynthesisUtterance(CAPS.speaking[1]); u.rate=1.02;
+    u.onboundary=()=>{ttsT0=performance.now();}; u.onend=()=>setState('idle'); speechSynthesis.cancel(); speechSynthesis.speak(u);}catch(e){}
+};
+addEventListener('hashchange',()=>setState(location.hash.slice(1),true));
+setState(STATES.includes(location.hash.slice(1))?location.hash.slice(1):'idle',true);
+// snap to the initial state so screenshots are correct immediately
+Object.assign(cur,tgt); col=[...colT];
+if(DEMO){let i=STATES.indexOf(state);setInterval(()=>{i=(i+1)%STATES.length; if(STATES[i]==='thinking')setBrain('gemini'); if(STATES[i]==='idle')setBrain('phone'); setState(STATES[i]);},2000);}
+function tick(){const d=new Date();$('clock').textContent=d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',hour12:false});}
+tick(); setInterval(tick,10000);
+if(navigator.getBattery)navigator.getBattery().then(b=>{const f=()=>$('bat').textContent=Math.round(b.level*100)+'%';f();b.onlevelchange=f;}).catch(()=>{});
+
+// ---------- loop ----------
+const BASE=[0.22,0.62,1.0];
+let last=performance.now(), t0=last, frames=0, fpsT=last, lvlS=0;
+function frame(now){
+  const dt=Math.min(.05,(now-last)/1000); last=now; const t=(now-t0)/1000;
+  const k=1-Math.exp(-dt*2.2); // smooth transitions (~0.5 s)
+  for(const key in tgt)cur[key]+=(tgt[key]-cur[key])*k;
+  for(let i=0;i<3;i++)col[i]+=(colT[i]-col[i])*k;
+  const [lv,lo,hi]=levels(t); lvlS+=(lv-lvlS)*Math.min(1,dt*14); const L=lvlS*cur.ag;
+  const breatheB=cur.b*(state==='idle'?(0.8+0.2*Math.sin(t*0.9)):1);
+  if(useGL){
+    gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.uniform1f(uni.uT,t*cur.sp+ t*0.2); gl.uniform1f(uni.uR,cur.r); gl.uniform1f(uni.uSw,cur.sw); gl.uniform1f(uni.uN,cur.n);
+    gl.uniform1f(uni.uSc,cur.sc); gl.uniform1f(uni.uLvl,L); gl.uniform1f(uni.uLo,0.5+lo); gl.uniform1f(uni.uHi,hi);
+    gl.uniform1f(uni.uPs,cur.ps); gl.uniform1f(uni.uAsp,W/H); gl.uniform1f(uni.uDpr,H/1080);
+    gl.uniform1f(uni.uB,breatheB*(Q==='low'?1.4:Q==='high'?0.75:1.0)); gl.uniform3fv(uni.uC,col); gl.uniform3fv(uni.uBase,BASE); gl.uniform1f(uni.uCm,cur.cm);
+    gl.uniform3f(uni.uTint,cur.tr,cur.tg,cur.tb); gl.uniform1f(uni.uFlat,cur.fl);
+    gl.uniform1f(uni.uBloom,0.0); gl.drawArrays(gl.POINTS,0,N);
+    if(Q!=='low'){gl.uniform1f(uni.uBloom,1.0); gl.drawArrays(gl.POINTS,0,Q==='high'?N:Math.floor(N/2));}
+  }else{
+    c2.globalCompositeOperation='source-over'; c2.fillStyle='#000'; c2.fillRect(0,0,W,H); c2.globalCompositeOperation='lighter';
+    const cx=W/2,cy=H/2,sc=H*0.33*cur.r; const a=t*(.1+cur.sw*.3);
+    for(const p of pts2){const ca=Math.cos(a),sa=Math.sin(a);let x=p[0]*ca-p[2]*sa,z=p[0]*sa+p[2]*ca,y=p[1];
+      const f=1+L*.25*Math.sin(y*7-t*6)+cur.sc*(p[3]-.5)*2; const zz=z+3.2; const px=cx+x*f*sc*3/zz, py=cy+y*f*sc*3/zz;
+      const al=cur.b*(0.3+0.7*(4.4-zz)/2.4)*.6; c2.fillStyle=`rgba(${col[0]*255|0},${col[1]*255|0},${col[2]*255|0},${al.toFixed(3)})`;
+      c2.beginPath(); c2.arc(px,py,(1.2+2*(4.4-zz)/2.4)*DPR,0,6.283); c2.fill();}
+  }
+  frames++; if(now-fpsT>1000){$('fps').textContent=(useGL?'webgl ':'2d ')+N+' pts '+frames+' fps';frames=0;fpsT=now;}
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
