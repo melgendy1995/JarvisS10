@@ -1,5 +1,6 @@
 package com.jarvis.provider.groq
 
+import com.jarvis.core.brain.JarvisPrompt
 import java.time.Duration
 
 /** Chat and Whisper ids. Change them here, nowhere else. */
@@ -20,10 +21,5 @@ object GroqModels {
     const val TPM_COOLDOWN_SECONDS = 60L
     const val PCM_SAMPLE_RATE = 16_000
 
-    const val SYSTEM =
-        "You are Jarvis, Mahmoud's voice assistant on a phone. " +
-            "Answer in one or two short spoken sentences. " +
-            "Use the time, timer, and flashlight tools when the user asks for those. " +
-            "Do not invent tool results. " +
-            "Continue the conversation from the recent turns."
+    const val SYSTEM = JarvisPrompt.SYSTEM
 }

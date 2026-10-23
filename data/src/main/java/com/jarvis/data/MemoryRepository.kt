@@ -18,13 +18,15 @@ class MemoryRepository(
     suspend fun snapshot(channel: String): MemorySnapshot {
         val profile = ensureProfile()
         val summary = dao.summary(Summary.ID)
+        val turns = dao.turns(channel)
+            .filterNot { FallbackMemory.shouldDrop(it.role, it.text, it.brainId) }
         return MemorySnapshot(
             name = profile.name,
             language = profile.language,
             persona = profile.persona,
             facts = FactRank.top(dao.facts()),
-            summary = summary?.text.orEmpty(),
-            turns = dao.turns(channel).takeLast(MemoryLimits.KEEP_TURNS),
+            summary = scrubSummary(summary?.text.orEmpty()),
+            turns = turns.takeLast(MemoryLimits.KEEP_TURNS),
         )
     }
 
@@ -76,6 +78,7 @@ class MemoryRepository(
     suspend fun appendTurn(role: String, text: String, brainId: String, channel: String): PruneOutcome {
         val clean = text.trim()
         if (clean.isEmpty()) return currentOutcome()
+        if (FallbackMemory.shouldDrop(role, clean, brainId)) return currentOutcome()
         val existing = dao.turns(channel)
         val last = existing.lastOrNull()
         if (last != null && last.role == role && last.text == clean) return currentOutcome()
@@ -93,8 +96,10 @@ class MemoryRepository(
         if (decision.dropped.isEmpty()) return currentOutcome()
         dao.deleteTurns(decision.dropped.map { it.id })
         val summary = dao.summary(Summary.ID) ?: Summary()
-        val lines = decision.dropped.map { SummaryText.line(it.role, it.text) }
-        val local = SummaryText.truncate(summary.text, lines)
+        val lines = decision.dropped
+            .filterNot { FallbackMemory.shouldDrop(it.role, it.text, it.brainId) }
+            .map { SummaryText.line(it.role, it.text) }
+        val local = SummaryText.truncate(scrubSummary(summary.text), lines)
         val count = summary.turnsSinceCloud + decision.dropped.size
         val ask = count >= MemoryLimits.SUMMARIZE_EVERY
         val saved = summary.copy(
@@ -116,9 +121,24 @@ class MemoryRepository(
         val current = dao.summary(Summary.ID) ?: return false
         if (current.updatedAt != expectedUpdatedAt) return false
         val clean = text.trim().take(MemoryLimits.SUMMARY_CHARS)
-        if (clean.isEmpty()) return false
+        if (clean.isEmpty() || FallbackMemory.isFallbackText(clean)) return false
         dao.upsertSummary(current.copy(text = clean, updatedAt = now()))
         return true
+    }
+
+    /**
+     * Drops every channel's turns and the rolling summary.
+     * Profile and facts are left as they are.
+     */
+    suspend fun clearConversation(): ConversationCleared {
+        val turns = dao.countTurns()
+        val summary = dao.summary(Summary.ID)
+        val summaryCount = if (summary?.text?.isNotBlank() == true) 1 else 0
+        dao.deleteAllTurns()
+        if (summary != null) {
+            dao.upsertSummary(summary.copy(text = "", updatedAt = now(), turnsSinceCloud = 0))
+        }
+        return ConversationCleared(turns = turns, summary = summaryCount)
     }
 
     private suspend fun ensureProfile(): Profile {
@@ -133,10 +153,14 @@ class MemoryRepository(
         return created
     }
 
+    private fun scrubSummary(text: String): String {
+        return if (FallbackMemory.isFallbackText(text)) "" else text
+    }
+
     private suspend fun currentOutcome(): PruneOutcome {
         val summary = dao.summary(Summary.ID)
         return PruneOutcome(
-            localSummary = summary?.text.orEmpty(),
+            localSummary = scrubSummary(summary?.text.orEmpty()),
             summaryUpdatedAt = summary?.updatedAt ?: 0,
         )
     }
@@ -149,6 +173,11 @@ data class MemorySnapshot(
     val facts: List<Fact>,
     val summary: String,
     val turns: List<Turn>,
+)
+
+data class ConversationCleared(
+    val turns: Int,
+    val summary: Int,
 )
 
 data class PruneOutcome(

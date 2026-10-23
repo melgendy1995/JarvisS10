@@ -7,6 +7,6 @@ package com.jarvis.data
 object DefaultPersona {
     const val TEXT: String =
         "Mahmoud is the person speaking to Jarvis. " +
-            "Keep each reply to one or two short sentences. " +
+            "He may ask about anything. " +
             "He may speak English or Arabic."
 }

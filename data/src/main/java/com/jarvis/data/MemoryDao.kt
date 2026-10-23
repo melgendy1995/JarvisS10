@@ -40,4 +40,10 @@ interface MemoryDao {
 
     @Query("DELETE FROM turns WHERE id IN (:ids)")
     suspend fun deleteTurns(ids: List<Long>)
+
+    @Query("SELECT COUNT(*) FROM turns")
+    suspend fun countTurns(): Int
+
+    @Query("DELETE FROM turns")
+    suspend fun deleteAllTurns()
 }

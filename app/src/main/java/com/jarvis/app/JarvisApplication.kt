@@ -41,6 +41,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 class JarvisApplication : Application() {
     val announcements = MutableSharedFlow<String>(extraBufferCapacity = 8)
@@ -93,6 +94,9 @@ class JarvisApplication : Application() {
         super.onCreate()
         timers = AppTimerScheduler(this, announcements)
         memory = MemoryRepository(JarvisDatabase.create(this).memoryDao())
+        runBlocking(Dispatchers.IO) {
+            PhoneFallbackMigration.run(this@JarvisApplication, memory)
+        }
         val registry = SkillRegistry()
         registry.register(TimeSkill())
         registry.register(TimerSkill(timers))

@@ -52,4 +52,10 @@ class FakeMemoryDao : MemoryDao {
     override suspend fun deleteTurns(ids: List<Long>) {
         turns.removeAll { it.id in ids }
     }
+
+    override suspend fun countTurns(): Int = turns.size
+
+    override suspend fun deleteAllTurns() {
+        turns.clear()
+    }
 }

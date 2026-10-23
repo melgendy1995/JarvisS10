@@ -19,6 +19,7 @@ import com.jarvis.core.brain.LiveFollowUp
 import com.jarvis.core.brain.MemoryFact
 import com.jarvis.core.brain.Speaker
 import com.jarvis.data.Channels
+import com.jarvis.data.FallbackMemory
 import com.jarvis.data.SummaryText
 import com.jarvis.data.TurnRole
 import com.jarvis.orb.BrainAccent
@@ -401,8 +402,10 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
         lastBrainId = brainId
         Log.i(VOICE, "utterance result brain=$brainId")
-        record(TurnRole.USER, text, brainId)
-        if (result is BrainResult.Answer) record(TurnRole.ASSISTANT, result.text, brainId)
+        if (result is BrainResult.Answer) {
+            record(TurnRole.USER, text, brainId)
+            record(TurnRole.ASSISTANT, result.text, brainId)
+        }
         present(result, gen)
     }
 
@@ -732,6 +735,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         if (line.isEmpty()) return
         val outcome = app.memory.appendTurn(role, line, brainId, Channels.VOICE)
         if (!outcome.askCloud || outcome.localSummary.isBlank()) return
+        if (FallbackMemory.isFallbackText(outcome.localSummary)) return
         val stamp = outcome.summaryUpdatedAt
         val prompt = SummaryText.cloudPrompt(outcome.localSummary)
         viewModelScope.launch {

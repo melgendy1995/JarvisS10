@@ -17,6 +17,9 @@ class MemoryRepositoryTest {
         assertEquals("Mahmoud", profile.name)
         assertEquals("en", profile.language)
         assertEquals(DefaultPersona.TEXT, profile.persona)
+        assertTrue(profile.persona.contains("anything"))
+        assertFalse(profile.persona.contains("phone", ignoreCase = true))
+        assertFalse(profile.persona.contains("flashlight", ignoreCase = true))
         repository.savePersona("x".repeat(MemoryLimits.PERSONA_CHARS + 50))
         assertEquals(MemoryLimits.PERSONA_CHARS, repository.profile().persona.length)
         assertEquals("Mahmoud", repository.profile().name)
@@ -86,5 +89,79 @@ class MemoryRepositoryTest {
         repository.appendTurn(TurnRole.USER, "from telegram", "phone", Channels.TELEGRAM)
         assertEquals(20, repository.snapshot(Channels.VOICE).turns.size)
         assertEquals(listOf("from telegram"), repository.snapshot(Channels.TELEGRAM).turns.map { it.text })
+    }
+
+    @Test
+    fun phoneOnlyFallbacksAreNotStoredOrSummarized() = runBlocking {
+        dao.insertTurn(
+            Turn(
+                role = TurnRole.ASSISTANT,
+                text = "I can only do basic phone functions.",
+                brainId = "offline",
+                channel = Channels.VOICE,
+                timestamp = 1,
+            ),
+        )
+        repository.appendTurn(
+            TurnRole.ASSISTANT,
+            "I can tell you the time, set a timer, or toggle your flashlight.",
+            "gemini-text",
+            Channels.VOICE,
+        )
+        repository.appendTurn(
+            TurnRole.ASSISTANT,
+            "No brain yet. I can tell the time, set a timer, or toggle the flashlight.",
+            "phone",
+            Channels.VOICE,
+        )
+        repository.appendTurn(TurnRole.ASSISTANT, "Something went wrong.", "offline", Channels.VOICE)
+        repository.appendTurn(TurnRole.USER, "what is the capital of Japan", "gemini-text", Channels.VOICE)
+        repository.appendTurn(TurnRole.ASSISTANT, "Tokyo.", "gemini-text", Channels.VOICE)
+        repository.appendTurn(TurnRole.ASSISTANT, "Flashlight on.", "phone", Channels.VOICE)
+        repeat(18) { index ->
+            repository.appendTurn(TurnRole.USER, "line $index", "phone", Channels.VOICE)
+        }
+        val snap = repository.snapshot(Channels.VOICE)
+        assertFalse(snap.turns.any { FallbackMemory.isFallbackText(it.text) })
+        assertFalse(snap.turns.any { it.brainId == "offline" && it.role == TurnRole.ASSISTANT })
+        assertTrue(snap.turns.any { it.text == "Tokyo." })
+        assertTrue(snap.turns.any { it.text == "Flashlight on." })
+        assertFalse(snap.summary.contains("basic phone", ignoreCase = true))
+        assertFalse(snap.summary.contains("tell you the time", ignoreCase = true))
+        assertFalse(snap.summary.contains("No brain yet", ignoreCase = true))
+    }
+
+    @Test
+    fun clearConversationKeepsProfileAndFacts() = runBlocking {
+        repository.savePersona("Custom about Mahmoud")
+        repository.remember("city", "Riyadh", "voice")
+        repeat(21) { index ->
+            repository.appendTurn(TurnRole.USER, "line $index", "phone", Channels.VOICE)
+        }
+        val cleared = repository.clearConversation()
+        assertEquals(20, cleared.turns)
+        assertEquals(1, cleared.summary)
+        val snap = repository.snapshot(Channels.VOICE)
+        assertTrue(snap.turns.isEmpty())
+        assertEquals("", snap.summary)
+        assertEquals("Mahmoud", snap.name)
+        assertEquals("Custom about Mahmoud", snap.persona)
+        assertEquals(listOf("Riyadh"), repository.recall("city").map { it.value })
+    }
+
+    @Test
+    fun cloudRewriteOfAPhoneOnlySummaryIsRejected() = runBlocking {
+        repeat(20) { index ->
+            repository.appendTurn(TurnRole.USER, "seed $index", "phone", Channels.VOICE)
+        }
+        val overflow = repository.appendTurn(TurnRole.USER, "extra", "phone", Channels.VOICE)
+        assertFalse(
+            repository.replaceSummary(
+                overflow.summaryUpdatedAt,
+                "I can only do basic phone functions.",
+            ),
+        )
+        assertFalse(repository.snapshot(Channels.VOICE).summary.contains("basic phone", ignoreCase = true))
+        assertTrue(repository.snapshot(Channels.VOICE).summary.contains("seed 0"))
     }
 }

@@ -1,8 +1,9 @@
 package com.jarvis.provider.gemini
 
+import com.jarvis.core.brain.JarvisPrompt
 import java.time.ZoneId
 
-/** Model ids and client caps. Change them here, nowhere else. */
+/** Model ids and client caps. Change them here, nowhere else. The shared cloud prompt is [JarvisPrompt]. */
 object ModelConfig {
     const val LIVE_MODEL = "gemini-3.1-flash-live-preview"
     /** Used only when the server rejects [LIVE_MODEL]. Firebase AI Logic on the Gemini Developer API supports this Live id. */
@@ -23,9 +24,5 @@ object ModelConfig {
 
     val ZONE: ZoneId = ZoneId.of("America/Los_Angeles")
 
-    const val SYSTEM_PROMPT =
-        "You are Jarvis, Mahmoud's voice assistant on a phone. " +
-            "Answer in one or two short spoken sentences. " +
-            "Use the time, timer, and flashlight tools when the user asks for those. " +
-            "Do not invent tool results."
+    const val SYSTEM_PROMPT = JarvisPrompt.SYSTEM
 }

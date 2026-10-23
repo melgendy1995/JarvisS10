@@ -1,6 +1,7 @@
 package com.jarvis.provider.groq
 
 import com.jarvis.core.brain.BrainError
+import com.jarvis.core.brain.JarvisPrompt
 import com.jarvis.core.brain.BrainRequest
 import com.jarvis.core.brain.BrainResult
 import com.jarvis.core.brain.ConversationTurn
@@ -158,10 +159,14 @@ class GroqBrainTest {
         ) as BrainResult.Answer
         assertEquals("Noted.", result.text)
         val system = transport.chats.single().messages.first()
+        val body = system.content.orEmpty()
         assertEquals("system", system.role)
-        assertTrue(system.content!!.contains("Lives in Riyadh."))
-        assertTrue(system.content.contains("tea: mint"))
-        assertTrue(system.content.contains("Talked about the trip."))
+        assertTrue(body.startsWith(JarvisPrompt.SYSTEM))
+        assertTrue(body.contains("general-knowledge"))
+        assertFalse(body.contains("voice assistant on a phone"))
+        assertTrue(body.contains("Lives in Riyadh."))
+        assertTrue(body.contains("tea: mint"))
+        assertTrue(body.contains("Talked about the trip."))
     }
 
     @Test
