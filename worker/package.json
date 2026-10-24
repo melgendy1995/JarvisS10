@@ -1,0 +1,5 @@
+{
+  "name": "jarvis-groq-proxy",
+  "private": true,
+  "type": "module"
+}

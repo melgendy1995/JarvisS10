@@ -5,7 +5,12 @@ compatibility_date = "2024-11-12"
 # No secrets in this file.
 #   npx wrangler secret put GROQ_API_KEY
 #   npx wrangler secret put JARVIS_BEARER
+# Optional. /search skips a provider when its secret is unset.
+#   npx wrangler secret put TAVILY_API_KEY
+#   npx wrangler secret put BRAVE_API_KEY
 
 [vars]
 CHAT_DAILY_LIMIT = "1200"
 WHISPER_DAILY_LIMIT = "2000"
+BROWSER_DAILY_LIMIT = "100"
+SEARCH_DAILY_LIMIT = "300"
