@@ -129,7 +129,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private var pendingPermission: String? = null
     private var mic: PcmMic? = null
     private var activeFollowUp: LiveFollowUp? = null
-    private val utteranceMic = PcmMic(ModelConfig.INPUT_SAMPLE_RATE_HZ)
+    private val utteranceMic = PcmMic(getApplication(), ModelConfig.INPUT_SAMPLE_RATE_HZ)
     private val utterancePcm = ByteArrayOutputStream()
     private val pcmLock = Any()
     private var captureOpen = false
@@ -644,7 +644,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     private suspend fun runFollowUp(followUp: LiveFollowUp) {
         activeFollowUp = followUp
-        val capture = PcmMic(ModelConfig.INPUT_SAMPLE_RATE_HZ)
+        val capture = PcmMic(getApplication(), ModelConfig.INPUT_SAMPLE_RATE_HZ)
         mic = capture
         val frames = Channel<ByteArray>(capacity = 8)
         val incoming = Channel<LiveEvent>(Channel.UNLIMITED)
