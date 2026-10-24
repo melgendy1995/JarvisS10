@@ -11,6 +11,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.jarvis.app.system.KioskGate
 import com.jarvis.app.ui.JarvisScreen
 import com.jarvis.app.ui.theme.JarvisTheme
 
@@ -35,9 +36,20 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        KioskGate.attach(this)
+    }
+
     override fun onResume() {
         super.onResume()
         hideSystemBars()
+        KioskGate.onJarvisVisible()
+    }
+
+    override fun onStop() {
+        KioskGate.detach(this)
+        super.onStop()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

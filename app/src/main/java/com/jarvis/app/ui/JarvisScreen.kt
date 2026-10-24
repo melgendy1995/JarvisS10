@@ -27,11 +27,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -48,6 +55,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jarvis.app.JarvisEvent
 import com.jarvis.app.JarvisViewModel
+import com.jarvis.app.R
+import com.jarvis.app.system.JarvisAccessibilityService
 import com.jarvis.orb.BrainAccent
 import com.jarvis.orb.OrbState
 import com.jarvis.orb.OrbView
@@ -97,6 +106,7 @@ fun JarvisScreen(viewModel: JarvisViewModel) {
                 brain = ui.brain,
                 accent = ui.accent,
             )
+            AccessibilityHint()
             HoldToTalk(
                 holding = ui.holding,
                 onHoldStart = viewModel::onHoldStart,
@@ -248,6 +258,31 @@ private fun Captions(
             )
         }
     }
+}
+
+@Composable
+private fun AccessibilityHint() {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var enabled by remember { mutableStateOf(JarvisAccessibilityService.isEnabled(context)) }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                enabled = JarvisAccessibilityService.isEnabled(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    if (enabled) return
+    Text(
+        text = stringResource(R.string.accessibility_onboarding),
+        modifier = Modifier.padding(horizontal = 28.dp, vertical = 4.dp),
+        color = Color(0xFF8AA0B5),
+        fontSize = 13.sp,
+        fontWeight = FontWeight.Light,
+        textAlign = TextAlign.Center,
+    )
 }
 
 @Composable

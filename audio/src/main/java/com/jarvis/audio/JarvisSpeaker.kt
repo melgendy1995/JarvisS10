@@ -1,6 +1,7 @@
 package com.jarvis.audio
 
 import android.content.Context
+import android.media.AudioAttributes
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -78,6 +79,13 @@ class JarvisSpeaker(context: Context) {
     private fun becomeReady(engine: TextToSpeech) {
         tts = engine
         ready = true
+        // Assistant usage ducks music instead of taking exclusive focus and pausing YouTube.
+        engine.setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build(),
+        )
         // Idle default stays the previous rate until an English line applies JarvisTts.
         engine.setPitch(1.0f)
         engine.setSpeechRate(1.02f)

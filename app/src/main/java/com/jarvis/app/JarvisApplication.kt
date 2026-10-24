@@ -7,6 +7,8 @@ import com.jarvis.app.system.CameraTorchController
 import com.jarvis.core.CommandRouter
 import com.jarvis.core.brain.BrainChain
 import com.jarvis.core.brain.BrainResult
+import com.jarvis.app.system.AndroidAppControl
+import com.jarvis.core.skills.AppControlSkill
 import com.jarvis.core.skills.FlashlightSkill
 import com.jarvis.core.skills.MemorySkill
 import com.jarvis.core.skills.SkillRegistry
@@ -102,6 +104,7 @@ class JarvisApplication : Application() {
         registry.register(TimerSkill(timers))
         registry.register(FlashlightSkill(CameraTorchController(this)))
         registry.register(MemorySkill(RoomMemory(memory)))
+        registry.register(AppControlSkill(AndroidAppControl(this)))
         router = CommandRouter(registry)
         firebaseReady = GeminiFirebase.install(this)
         val usage = UsageCounter(SystemTimeSource, SharedPrefsUsageStore(this))

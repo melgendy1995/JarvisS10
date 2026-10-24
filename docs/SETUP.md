@@ -46,3 +46,7 @@ The phone never calls `api.groq.com` and never holds a Groq key. A Cloudflare Wo
 The worker's daily counters (1,200 chat requests, 2,000 Whisper requests) live in the isolate and reset on a cold start. The phone also rotates `openai/gpt-oss-120b`, `qwen/qwen3.8-27b`, and `openai/gpt-oss-20b`, cools only the model that returned 429, and stops each one near 180K tokens in a rolling 24 hours. Replace `JARVIS_BEARER` to revoke a lost phone without shipping a new APK.
 
 Whisper runs only after on-device speech recognition fails, and only when Gemini or Groq can still answer. The transcript still goes through the on-device router first.
+
+## Voice control of other apps
+
+"Open YouTube", "play … on YouTube", pause, and volume are documented in [APP_CONTROL.md](APP_CONTROL.md), including the accessibility switch, kiosk device-owner command, and what Android 12 allows while another app is in front.
