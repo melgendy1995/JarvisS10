@@ -9,6 +9,7 @@ import com.jarvis.app.system.CameraPasswordStore
 import com.jarvis.app.system.CameraPortStore
 import com.jarvis.app.system.CameraTorchController
 import com.jarvis.app.system.OpenMeteoClient
+import com.jarvis.app.system.SpotQuoteClient
 import com.jarvis.app.system.StreamAddressLookup
 import com.jarvis.core.CommandRouter
 import com.jarvis.core.brain.BrainChain
@@ -19,6 +20,7 @@ import com.jarvis.core.skills.AppControlSkill
 import com.jarvis.core.skills.CameraSkill
 import com.jarvis.core.skills.FlashlightSkill
 import com.jarvis.core.skills.MemorySkill
+import com.jarvis.core.skills.MetalsSkill
 import com.jarvis.core.skills.SkillRegistry
 import com.jarvis.core.skills.TimeSkill
 import com.jarvis.core.skills.TimerSkill
@@ -30,6 +32,8 @@ import com.jarvis.provider.gemini.GeminiCooldown
 import com.jarvis.provider.gemini.GeminiFirebase
 import com.jarvis.provider.gemini.GeminiLiveBrain
 import com.jarvis.provider.gemini.GeminiTextBrain
+import com.jarvis.provider.gemini.retireStaleGroundingCooldown
+import com.jarvis.provider.gemini.ModelConfig
 import com.jarvis.provider.gemini.NetworkStatus
 import com.jarvis.provider.gemini.SharedPrefsCooldownStore
 import com.jarvis.provider.gemini.SharedPrefsUsageStore
@@ -115,6 +119,7 @@ class JarvisApplication : Application() {
         val registry = SkillRegistry()
         registry.register(TimeSkill())
         registry.register(WeatherSkill(OpenMeteoClient(), AndroidCoarseLocation(this)))
+        registry.register(MetalsSkill(SpotQuoteClient()))
         registry.register(TimerSkill(timers))
         registry.register(FlashlightSkill(CameraTorchController(this)))
         registry.register(MemorySkill(RoomMemory(memory)))
@@ -127,6 +132,7 @@ class JarvisApplication : Application() {
         firebaseReady = GeminiFirebase.install(this)
         val usage = UsageCounter(SystemTimeSource, SharedPrefsUsageStore(this))
         geminiCooldown = GeminiCooldown(SystemTimeSource, SharedPrefsCooldownStore(this))
+        retireStaleGroundingCooldown(this, geminiCooldown, ModelConfig.GROUNDING_MODEL)
         network = NetworkStatus(this)
         bearerStore = KeystoreBearerStore(this)
         val transport = groqTransport(

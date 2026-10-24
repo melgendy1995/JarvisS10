@@ -16,7 +16,9 @@ class CommandRouter(
             return SkillResult(text = "I didn't catch that.", success = false)
         }
         val match = registry.match(trimmed) ?: return NO_BRAIN
-        return match.skill.run(match.call)
+        val result = match.skill.run(match.call)
+        if (result.continueToBrain) return NO_BRAIN
+        return result
     }
 
     companion object {

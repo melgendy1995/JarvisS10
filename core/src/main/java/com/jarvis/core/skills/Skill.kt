@@ -30,4 +30,9 @@ data class SkillResult(
     val needsPermission: String? = null,
     /** One-line shelf label. The spoken answer stays in [text]. */
     val shelf: String? = null,
+    /**
+     * The router should ignore this result and ask a brain.
+     * Used when a live skill has no quote and search should answer instead.
+     */
+    val continueToBrain: Boolean = false,
 )
