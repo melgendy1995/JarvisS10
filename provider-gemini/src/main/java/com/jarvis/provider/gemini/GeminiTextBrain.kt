@@ -134,11 +134,26 @@ class GeminiTextBrain(
     }
 
     /**
-     * One grounded call. A failure stays a failure so the chain can say search is down,
-     * instead of answering news from memory. The daily cap is the only path back to normal text.
+     * Grounded calls. A failure stays a failure so the chain can try Groq browser
+     * search and the Worker search, instead of answering news from memory.
+     * The second model runs only when the first id is rejected, not after a 429.
      */
     private suspend fun completeGrounded(request: BrainRequest): BrainResult {
-        val model = ModelConfig.GROUNDING_MODEL
+        val models = listOf(ModelConfig.GROUNDING_MODEL, ModelConfig.GROUNDING_MODEL_FALLBACK).distinct()
+        var last: BrainResult.Failure = BrainResult.Failure(id, BrainError.Unavailable)
+        for ((index, model) in models.withIndex()) {
+            val outcome = oneGrounded(request, model)
+            if (outcome is BrainResult.Answer) return outcome
+            last = outcome as BrainResult.Failure
+            val rejected = lastModelRejected
+            lastModelRejected = false
+            if (!rejected || index == models.lastIndex) return last
+            Log.w(TAG, "grounding model rejected model=$model fallback=${models[index + 1]}")
+        }
+        return last
+    }
+
+    private suspend fun oneGrounded(request: BrainRequest, model: String): BrainResult {
         val count = usage.snapshot().groundedRequests
         JarvisLog.i(SEARCH, "grounded begin model=$model count=$count")
         Log.i(TAG, "text begin model=$model backend=${GeminiModels.BACKEND} grounding=search")
@@ -162,6 +177,7 @@ class GeminiTextBrain(
                 BrainResult.Failure(id, BrainError.Unavailable)
             } else {
                 Log.i(TAG, "text result model=$model chars=${text.length} preview=${preview(text)}")
+                JarvisLog.i(SEARCH, "path=grounding model=$model")
                 BrainResult.Answer(
                     brainId = id,
                     accent = accent,
@@ -182,7 +198,14 @@ class GeminiTextBrain(
             Log.w(TAG, "text cancelled model=$model ${cancelled.causeChain()}", cancelled)
             BrainResult.Failure(id, BrainError.Unavailable)
         } catch (error: Throwable) {
-            if (error.isModelRejected()) {
+            lastModelRejected = error.isModelRejected()
+            val line = QuotaSignals.failureLine(model, error)
+            val body = QuotaSignals.failureBody(error)
+            Log.w(TAG, line)
+            Log.w(TAG, "grounded failure body=$body")
+            JarvisLog.i(SEARCH, line)
+            JarvisLog.i(SEARCH, "grounded failure body=$body")
+            if (lastModelRejected) {
                 Log.w(TAG, "text model not found model=$model ${error.causeChain()}", error)
             }
             error.toBrainFailure(id, cooldown, time)

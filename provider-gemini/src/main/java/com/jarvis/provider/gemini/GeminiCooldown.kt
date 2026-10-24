@@ -70,6 +70,8 @@ class GeminiCooldown(
 
     fun isCooling(): Boolean = active() != null
 
+    fun clear() = synchronized(lock) { store.clear() }
+
     fun cool(message: String, retryAfter: Duration?): Cooldown = synchronized(lock) {
         val applied = CooldownPolicy.until(
             now = time.now(),

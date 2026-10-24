@@ -13,11 +13,18 @@ object ModelConfig {
     const val TEXT_MODEL_FALLBACK = "gemini-3.5-flash-lite"
 
     /**
-     * Google Search grounding only. Firebase AI Logic lists this id, including the
-     * older 3.1 Flash-Lite, as supporting the tool. firebase-ai 18.1.0 exposes
-     * Tool.googleSearch() and Candidate.groundingMetadata.
+     * Google Search grounding on the free tier. Checked 2026-10-24.
+     *
+     * gemini-2.5-flash-lite is no longer available to new users (as of Oct 2026).
+     * The API recommends gemini-3.5-flash-lite, which supports Grounding with
+     * Google Search on the free developer tier.
+     * The phone still stops at [DAILY_GROUNDED_CAP] grounded calls per Pacific day.
+     * firebase-ai exposes Tool.googleSearch() and Candidate.groundingMetadata.
      */
-    const val GROUNDING_MODEL = "gemini-3.1-flash-lite"
+    const val GROUNDING_MODEL = "gemini-3.5-flash-lite"
+
+    /** Fallback when [GROUNDING_MODEL] is rejected. Uses the same grounding quota. */
+    const val GROUNDING_MODEL_FALLBACK = "gemini-2.5-flash"
 
     /** Grounded calls per Pacific day. Past this, the normal ungrounded path runs. */
     const val DAILY_GROUNDED_CAP = 30

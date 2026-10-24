@@ -165,6 +165,8 @@ internal fun Throwable.isModelRejected(): Boolean {
         text.contains("unsupported model", ignoreCase = true) ||
         text.contains("was not found", ignoreCase = true) ||
         text.contains("does not exist", ignoreCase = true) ||
+        text.contains("no longer available", ignoreCase = true) ||
+        text.contains("deprecated", ignoreCase = true) ||
         (text.contains("404") && text.contains("model", ignoreCase = true))
 }
 
@@ -250,6 +252,22 @@ class SharedPrefsCooldownStore(context: Context) : CooldownStore {
         const val DAILY = "daily"
     }
 }
+
+/**
+ * A cooldown stored for the previous grounding model must not block the new one.
+ * The first launch after a model change clears it once.
+ */
+fun retireStaleGroundingCooldown(context: Context, cooldown: GeminiCooldown, model: String) {
+    val prefs = context.applicationContext.getSharedPreferences(GROUNDING_PREFS, Context.MODE_PRIVATE)
+    val previous = prefs.getString(GROUNDING_MODEL_KEY, null)
+    if (previous == model) return
+    cooldown.clear()
+    prefs.edit().putString(GROUNDING_MODEL_KEY, model).commit()
+    Log.i("JarvisSearch", "grounding model=$model previous=${previous ?: "none"}")
+}
+
+private const val GROUNDING_PREFS = "jarvis_gemini_grounding"
+private const val GROUNDING_MODEL_KEY = "model"
 
 object GeminiFirebase {
     @Volatile
