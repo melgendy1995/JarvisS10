@@ -148,7 +148,8 @@ class AndroidAppControl(context: Context) : AppControl {
         }
         var mix: UiNode? = null
         var tapped = false
-        for (attempt in 0 until 4) {
+        var scrolls = 0
+        for (attempt in 0 until 8) {
             val nodes = service.snapshot()
             val width = service.screenWidth()
             val height = service.screenHeight()
@@ -162,7 +163,13 @@ class AndroidAppControl(context: Context) : AppControl {
             }
             mix = YouTubeUi.firstMix(nodes, width, height) ?: mix
             if (attempt == 0) logRows(nodes)
-            if (!service.scrollResults()) break
+            // The search field appears before the rows. Scrolling then jumps past the first videos.
+            if (!YouTubeUi.hasLoadedRows(nodes)) {
+                delay(400)
+                continue
+            }
+            if (scrolls >= 2 || !service.scrollResults()) break
+            scrolls++
             delay(700)
         }
         if (!tapped && mix != null) {

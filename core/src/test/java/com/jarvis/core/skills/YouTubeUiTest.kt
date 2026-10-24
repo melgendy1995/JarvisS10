@@ -87,6 +87,51 @@ class YouTubeUiTest {
         assertFalse(YouTubeUi.controlAlready(listOf(pause), "pause"))
     }
 
+    @Test
+    fun landscapeShelfCardIsAVideoAndAPartialCardIsNot() {
+        val screenWidth = 3040
+        val screenHeight = 1440
+        val ad = row(
+            desc = "Sponsored - Effortlessly Increase Focus - Visit site",
+            top = 280,
+            bottom = 1068,
+            left = 139,
+            right = 2733,
+        )
+        val card = row(
+            desc = "The Haunted Manor - 2 minutes, 7 seconds - Lucid Keys - Topic - 50 thousand views - 3 weeks ago - play video",
+            top = 979,
+            bottom = 1272,
+            left = 209,
+            right = 769,
+        )
+        val clipped = row(
+            desc = "Scarecrow - 1 minute, 46 seconds - play video",
+            top = 979,
+            bottom = 1272,
+            left = 2449,
+            right = 2733,
+        )
+        assertEquals(card, YouTubeUi.firstVideo(listOf(ad, card, clipped), screenWidth, screenHeight))
+        assertTrue(YouTubeUi.hasLoadedRows(listOf(ad)))
+        assertFalse(YouTubeUi.hasLoadedRows(listOf(row(desc = "lo fi girl", top = 112, bottom = 252, left = 363, right = 2536))))
+    }
+
+    @Test
+    fun landscapePlayerBesideTheQueueCountsAsTheWatchPage() {
+        val player = UiNode(
+            text = "",
+            desc = "Video player",
+            viewId = "com.google.android.youtube:id/watch_player",
+            clickable = false,
+            left = 0,
+            top = 80,
+            right = 1800,
+            bottom = 1000,
+        )
+        assertTrue(YouTubeUi.isFullPlayer(listOf(player), 3040))
+    }
+
     private fun row(
         desc: String,
         top: Int,

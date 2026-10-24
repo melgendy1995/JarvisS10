@@ -49,11 +49,23 @@ object YouTubeUi {
             ?.first
     }
 
-    /** Full-width watch page, not the minimized player. */
+    /** Watch page, including the landscape player that sits beside the queue. */
     fun isFullPlayer(nodes: List<UiNode>, screenWidth: Int): Boolean {
         val player = playerBounds(nodes) ?: return false
         val width = screenWidth.coerceAtLeast(1)
-        return player.width >= (width * 0.7f).toInt() && player.top < 500 && player.height > 400
+        val tall = player.height > 400
+        val portrait = player.width >= (width * 0.7f).toInt() && player.top < 500 && tall
+        val landscape = player.width >= (width * 0.35f).toInt() && player.top < 800 && tall
+        return portrait || landscape
+    }
+
+    /** Search results have drawn. The search field alone does not count. */
+    fun hasLoadedRows(nodes: List<UiNode>): Boolean {
+        return nodes.any { node ->
+            if (!node.clickable || node.top < 260 || node.height < 200 || node.width < 400) return@any false
+            val blob = fold(normalize("${node.desc} ${node.text}"))
+            blob.isNotBlank() && !isChrome(blob)
+        }
     }
 
     fun skipButton(nodes: List<UiNode>): UiNode? {
@@ -132,8 +144,7 @@ object YouTubeUi {
         val blob = fold(normalize("${node.desc} ${node.text}"))
         if (blob.isBlank()) return Kind.SKIP
         if (isChrome(blob)) return Kind.SKIP
-        val fraction = node.width.toFloat() / screenWidth.toFloat()
-        if (fraction < 0.62f || node.height < 320) return Kind.SKIP
+        if (!resultSized(node, screenWidth)) return Kind.SKIP
         if (isAd(blob)) return Kind.SKIP
         if (isShorts(blob, node.viewId)) return Kind.SKIP
         if (isChannel(blob)) return Kind.SKIP
@@ -160,6 +171,16 @@ object YouTubeUi {
         if (desc == "الفيديو التالي" || desc == "التالي") return "next"
         if (desc == "الفيديو السابق" || desc == "السابق") return "previous"
         return ""
+    }
+
+    /**
+     * Portrait results are one full-width row. Landscape shelves are a strip of cards,
+     * about 560 by 293 on this phone, so a 62% width rule never sees them.
+     */
+    private fun resultSized(node: UiNode, screenWidth: Int): Boolean {
+        val fullRow = node.width >= (screenWidth * 0.62f).toInt() && node.height >= 280
+        val shelfCard = node.width in 480..(screenWidth / 2) && node.height >= 240
+        return fullRow || shelfCard
     }
 
     private fun isAd(blob: String): Boolean {
