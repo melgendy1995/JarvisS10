@@ -17,6 +17,10 @@ import kotlinx.coroutines.launch
  * adb shell am broadcast -a com.jarvis.app.DEBUG_ASK --es q "what is the capital of France"
  * Force the chain onto Groq with --ez gemini false.
  * [q] is injected as the recognized utterance, then the same voice-loop path speaks the answer.
+ *
+ * Force the shelf orb for screenshots:
+ * adb shell am broadcast -a com.jarvis.app.DEBUG_STATE -p com.jarvis.app --es state idle
+ * state is idle, listening, thinking, speaking, or error.
  */
 object GeminiDebug {
     @Volatile
@@ -30,6 +34,11 @@ fun registerDebugAsk(app: Application) = Unit
 
 class DebugAskReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action == STATE_ACTION) {
+            val name = intent.getStringExtra("state")
+            if (!OrbDebug.force(name)) Log.w(TAG, "bad state")
+            return
+        }
         if (intent.action != ACTION) return
         val question = intent.getStringExtra("q")?.trim().orEmpty()
         val gemini = intent.getBooleanExtra("gemini", true)
@@ -73,6 +82,7 @@ class DebugAskReceiver : BroadcastReceiver() {
 
     companion object {
         const val ACTION = "com.jarvis.app.DEBUG_ASK"
+        const val STATE_ACTION = "com.jarvis.app.DEBUG_STATE"
         const val TAG = "JarvisDebug"
 
         private val inFlight = AtomicBoolean(false)

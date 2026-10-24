@@ -23,6 +23,7 @@ import com.jarvis.data.FallbackMemory
 import com.jarvis.data.SummaryText
 import com.jarvis.data.TurnRole
 import com.jarvis.orb.BrainAccent
+import com.jarvis.orb.OrbSignals
 import com.jarvis.orb.OrbState
 import com.jarvis.provider.gemini.ModelConfig
 import com.jarvis.provider.groq.BackupSttPolicy
@@ -90,6 +91,10 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private val _events = MutableSharedFlow<JarvisEvent>(extraBufferCapacity = 4)
     val events = _events.asSharedFlow()
 
+    private fun pushLevel(value: Float) {
+        OrbSignals.level = value.coerceIn(0f, 1f)
+    }
+
     private var holding = false
     private var heard: String? = null
     private var routed = false
@@ -112,7 +117,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     private val callbacks = PushToTalkRecognizer.Callbacks(
         onLevel = { level ->
-            if (holding) _ui.update { it.copy(level = level) }
+            if (holding) pushLevel(level)
         },
         onPartial = { text ->
             if (text.isNotBlank()) _ui.update { it.copy(you = text) }
@@ -172,7 +177,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         if (!hasPermission(Manifest.permission.RECORD_AUDIO)) {
             _ui.update {
                 it.copy(
-                    reply = "Allow the microphone, then hold to talk.",
+                    reply = "Allow the microphone, then tap the orb.",
                     orb = OrbState.IDLE,
                     accent = BrainAccent.PHONE,
                     brain = "Phone",
@@ -184,6 +189,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
         generation++
         holding = true
+        pushLevel(0f)
         heard = null
         routed = false
         sttFailure = ""
@@ -211,6 +217,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     fun onHoldEnd() {
         if (!holding) return
         holding = false
+        pushLevel(0f)
         _ui.update { it.copy(holding = false) }
         freezeUtterancePcm()
         recognizer.stop()
@@ -285,7 +292,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             showProblem("Microphone permission was denied.")
         } else if (granted && permission == Manifest.permission.RECORD_AUDIO) {
             _ui.update {
-                it.copy(reply = "Hold to talk.", orb = OrbState.IDLE, accent = BrainAccent.PHONE, brain = "Phone")
+                it.copy(reply = "Tap or hold the orb.", orb = OrbState.IDLE, accent = BrainAccent.PHONE, brain = "Phone")
             }
         }
     }
@@ -367,6 +374,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
      */
     private suspend fun onRecognizedUtterance(text: String, gen: Int = generation) {
         Log.i(VOICE, "utterance begin chars=${text.length}")
+        pushLevel(0f)
         _ui.update {
             it.copy(
                 orb = OrbState.THINKING,
@@ -420,6 +428,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     try {
                         val pcm = result.audioPcm24k
                         if (pcm != null && pcm.isNotEmpty()) {
+                            pushLevel(0f)
                             _ui.update {
                                 it.copy(orb = OrbState.SPEAKING, reply = result.text, level = 0f)
                             }
@@ -470,12 +479,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 var offset = 0
                 while (offset < pcm.size && isActive) {
                     val end = minOf(offset + chunk, pcm.size)
-                    val level = player.write(pcm.copyOfRange(offset, end))
-                    if (level != null) {
-                        _ui.update { state ->
-                            if (state.orb == OrbState.SPEAKING) state.copy(level = level) else state
-                        }
-                    }
+                    val sample = player.write(pcm.copyOfRange(offset, end))
+                    if (sample != null && _ui.value.orb == OrbState.SPEAKING) pushLevel(sample)
                     offset = end
                 }
                 if (isActive) {
@@ -500,9 +505,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
         val started = capture.start { frame, level ->
             if (capture.muted) return@start
-            if (_ui.value.orb == OrbState.LISTENING) {
-                _ui.update { it.copy(level = level) }
-            }
+            if (_ui.value.orb == OrbState.LISTENING) pushLevel(level)
             frames.trySend(frame)
         }
         if (!started) {
@@ -520,6 +523,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
         val speaker = PcmSpeaker(ModelConfig.OUTPUT_SAMPLE_RATE_HZ)
         try {
+            pushLevel(0f)
             _ui.update { it.copy(orb = OrbState.LISTENING, level = 0f) }
             speaker.start()
             var listening = true
@@ -543,12 +547,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                         listening = false
                         capture.muted = true
                         _ui.update { it.copy(orb = OrbState.SPEAKING) }
-                        val level = withContext(Dispatchers.IO) { speaker.write(event.pcm24k) }
-                        if (level != null) {
-                            _ui.update { state ->
-                                if (state.orb == OrbState.SPEAKING) state.copy(level = level) else state
-                            }
-                        }
+                        pushLevel(0f)
+                        val sample = withContext(Dispatchers.IO) { speaker.write(event.pcm24k) }
+                        if (sample != null && _ui.value.orb == OrbState.SPEAKING) pushLevel(sample)
                     }
                     LiveEvent.TurnComplete -> {
                         record(TurnRole.ASSISTANT, _ui.value.reply, lastBrainId)
@@ -556,6 +557,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                         capture.muted = false
                         listening = true
                         deadline = System.nanoTime() + followUp.followUpWindow.toNanos()
+                        pushLevel(0f)
                         _ui.update { it.copy(orb = OrbState.LISTENING, level = 0f) }
                     }
                 }
@@ -589,18 +591,15 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
         mic?.muted = true
+        pushLevel(0f)
         val started = System.nanoTime()
         try {
             kotlinx.coroutines.coroutineScope {
                 val levels = launch {
                     while (isActive) {
                         val elapsed = (System.nanoTime() - started) / 1_000_000_000f
-                        _ui.update { state ->
-                            if (state.orb == OrbState.SPEAKING) {
-                                state.copy(level = SpeechEnvelope.levelAt(elapsed))
-                            } else {
-                                state
-                            }
+                        if (_ui.value.orb == OrbState.SPEAKING) {
+                            pushLevel(SpeechEnvelope.levelAt(elapsed))
                         }
                         delay(50)
                     }
@@ -623,6 +622,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun showProblem(message: String) {
         routed = true
+        pushLevel(0f)
         _ui.update {
             it.copy(
                 orb = OrbState.ERROR,
@@ -647,6 +647,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun showIdle(message: String) {
         routed = true
+        pushLevel(0f)
         _ui.update {
             it.copy(
                 orb = OrbState.IDLE,
@@ -690,7 +691,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private fun startUtteranceCapture() {
         synchronized(pcmLock) { utterancePcm.reset() }
         captureOpen = utteranceMic.start { frame, level ->
-            if (holding) _ui.update { it.copy(level = level) }
+            if (holding) pushLevel(level)
             synchronized(pcmLock) {
                 if (utterancePcm.size() >= MAX_UTTERANCE_BYTES) return@synchronized
                 val room = MAX_UTTERANCE_BYTES - utterancePcm.size()

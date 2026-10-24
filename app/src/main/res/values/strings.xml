@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Jarvis</string>
-    <string name="hold_to_talk">Hold to talk</string>
+    <string name="hold_to_talk">Tap or hold to talk</string>
     <string name="accessibility_service_description">Jarvis taps the first YouTube video after a voice search, and can pause, play, skip, and skip ads inside YouTube. Turn this on under Settings, Accessibility, Installed apps, Jarvis.</string>
     <string name="accessibility_onboarding">To play YouTube by voice: Settings &gt; Accessibility &gt; Installed apps &gt; Jarvis &gt; On</string>
     <string name="device_admin_description">Lets Jarvis stay in kiosk mode and open allowlisted apps when this phone has a device owner.</string>

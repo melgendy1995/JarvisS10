@@ -1,60 +1,26 @@
 package com.jarvis.orb
 
-import android.view.ViewGroup
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.Layout
 
 @Composable
 fun OrbView(
     state: OrbState,
-    level: Float,
-    accent: BrainAccent,
+    night: Boolean,
+    demoMotion: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val renderer = remember { OrbRenderer() }
-    val surface = remember {
-        OrbGLSurfaceView(context, renderer).apply {
-            layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            )
-        }
+    Layout(
+        content = {},
+        modifier = modifier
+            .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+            .ringOrb(state = state, night = night, demoMotion = demoMotion),
+    ) { _, constraints ->
+        val width = if (constraints.hasBoundedWidth) constraints.maxWidth else constraints.minWidth
+        val height = if (constraints.hasBoundedHeight) constraints.maxHeight else constraints.minHeight
+        layout(width, height) {}
     }
-    SideEffect {
-        renderer.targetState = state
-        renderer.audioLevel = level
-        renderer.targetAccent = accent
-    }
-    DisposableEffect(lifecycleOwner, surface) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_RESUME -> surface.resumeRendering()
-                Lifecycle.Event.ON_PAUSE -> surface.pauseRendering()
-                else -> Unit
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-            surface.resumeRendering()
-        }
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-            surface.pauseRendering()
-        }
-    }
-    AndroidView(
-        factory = { surface },
-        modifier = modifier,
-        onRelease = { it.pauseRendering() },
-    )
 }

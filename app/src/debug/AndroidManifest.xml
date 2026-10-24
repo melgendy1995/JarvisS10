@@ -6,6 +6,7 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="com.jarvis.app.DEBUG_ASK" />
+                <action android:name="com.jarvis.app.DEBUG_STATE" />
             </intent-filter>
         </receiver>
     </application>

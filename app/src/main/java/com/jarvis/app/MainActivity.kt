@@ -1,5 +1,6 @@
 package com.jarvis.app
 
+import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.os.Bundle
 import android.view.WindowManager
@@ -23,6 +24,10 @@ import com.jarvis.app.ui.theme.JarvisTheme
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        @Suppress("DEPRECATION")
+        window.isStatusBarContrastEnforced = false
+        window.isNavigationBarContrastEnforced = false
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(Color.BLACK),
             navigationBarStyle = SystemBarStyle.dark(Color.BLACK),
@@ -34,6 +39,7 @@ class MainActivity : ComponentActivity() {
                 JarvisScreen(viewModel = viewModel())
             }
         }
+        hideSystemBars()
     }
 
     override fun onStart() {
