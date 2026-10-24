@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.jarvis.core.brain.SearchSource
 import java.time.ZonedDateTime
 
 /** Nullable until a weather source is wired. Null renders the placeholder. */
@@ -59,6 +60,8 @@ fun ShelfPanel(
     weather: WeatherState?,
     you: String,
     reply: String,
+    sources: List<SearchSource> = emptyList(),
+    searchHtml: String? = null,
     brain: String,
     night: Boolean,
     accessibilityHint: String?,
@@ -137,6 +140,15 @@ fun ShelfPanel(
                         textColor = Color(0xFFFFF6E8).copy(alpha = ink),
                         labelSize = labelSize,
                         textSize = captionSize,
+                    )
+                }
+                if (sources.isNotEmpty() || !searchHtml.isNullOrBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    SearchGroundingBlock(
+                        sources = sources,
+                        html = searchHtml,
+                        color = Color(0xFF9EE7FF).copy(alpha = ink),
+                        fontSize = labelSize,
                     )
                 }
                 if (brain.isNotEmpty()) {

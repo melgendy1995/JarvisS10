@@ -17,6 +17,7 @@ import com.google.firebase.ai.type.SpeechConfig
 import com.google.firebase.ai.type.Tool
 import com.google.firebase.ai.type.Voice
 import com.google.firebase.ai.type.content
+import com.google.firebase.ai.type.generationConfig
 import com.google.firebase.ai.type.liveGenerationConfig
 import com.jarvis.core.brain.BrainError
 import com.jarvis.core.brain.BrainResult
@@ -33,6 +34,26 @@ internal object GeminiModels {
         null,
         null,
         toolList(registry),
+        null,
+        content("system") { text(system.ifBlank { ModelConfig.SYSTEM_PROMPT }) },
+    )
+
+    /**
+     * Google Search only. Function calling is a different tool and is not combined
+     * with search on this call.
+     * Temperature 1.0 is the documented setting for grounding.
+     */
+    fun grounded(
+        system: String,
+        model: String = ModelConfig.GROUNDING_MODEL,
+    ) = firebase().generativeModel(
+        model,
+        generationConfig {
+            temperature = 1.0f
+            maxOutputTokens = 256
+        },
+        null,
+        listOf(Tool.googleSearch()),
         null,
         content("system") { text(system.ifBlank { ModelConfig.SYSTEM_PROMPT }) },
     )
@@ -177,6 +198,7 @@ class SharedPrefsUsageStore(context: Context) : UsageStore {
             liveTurns = prefs.getInt(TURNS, 0),
             liveSeconds = prefs.getLong(SECONDS, 0),
             textRequests = prefs.getInt(TEXT, 0),
+            groundedRequests = prefs.getInt(GROUNDED, 0),
         )
     }
 
@@ -186,6 +208,7 @@ class SharedPrefsUsageStore(context: Context) : UsageStore {
             .putInt(TURNS, usage.liveTurns)
             .putLong(SECONDS, usage.liveSeconds)
             .putInt(TEXT, usage.textRequests)
+            .putInt(GROUNDED, usage.groundedRequests)
             .commit()
     }
 
@@ -195,6 +218,7 @@ class SharedPrefsUsageStore(context: Context) : UsageStore {
         const val TURNS = "live_turns"
         const val SECONDS = "live_seconds"
         const val TEXT = "text_requests"
+        const val GROUNDED = "grounded_requests"
     }
 }
 

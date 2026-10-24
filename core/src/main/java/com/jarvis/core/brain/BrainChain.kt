@@ -34,6 +34,7 @@ class BrainChain(
                 text = routed.text,
                 success = routed.success,
                 needsPermission = routed.needsPermission,
+                shelf = routed.shelf,
             )
         }
         var last: BrainError = BrainError.NotConfigured

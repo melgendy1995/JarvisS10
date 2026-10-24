@@ -12,6 +12,16 @@ object ModelConfig {
     /** Used only when the server says [TEXT_MODEL] is missing. */
     const val TEXT_MODEL_FALLBACK = "gemini-3.5-flash-lite"
 
+    /**
+     * Google Search grounding only. Firebase AI Logic lists this id, including the
+     * older 3.1 Flash-Lite, as supporting the tool. firebase-ai 18.1.0 exposes
+     * Tool.googleSearch() and Candidate.groundingMetadata.
+     */
+    const val GROUNDING_MODEL = "gemini-3.1-flash-lite"
+
+    /** Grounded calls per Pacific day. Past this, the normal ungrounded path runs. */
+    const val DAILY_GROUNDED_CAP = 30
+
     const val INPUT_SAMPLE_RATE_HZ = 16_000
     const val OUTPUT_SAMPLE_RATE_HZ = 24_000
 

@@ -64,6 +64,25 @@ class UsageAndCooldownTest {
     }
 
     @Test
+    fun groundedCapIsThirtyAndResetsAtPacificMidnight() {
+        val time = MutableTime(evening)
+        val store = MemoryUsage()
+        val counter = UsageCounter(time, store, zone = zone, groundedCap = 2)
+        assertTrue(counter.tryAcquireGrounded())
+        assertFalse(counter.groundedCapReached())
+        assertTrue(counter.tryAcquireGrounded())
+        assertTrue(counter.groundedCapReached())
+        assertFalse(counter.tryAcquireGrounded())
+        assertEquals(2, counter.snapshot().groundedRequests)
+        time.instant = morning
+        assertFalse(counter.groundedCapReached())
+        assertEquals(0, counter.snapshot().groundedRequests)
+        assertTrue(counter.tryAcquireGrounded())
+        val restarted = UsageCounter(time, store, zone = zone, groundedCap = 2)
+        assertEquals(1, restarted.snapshot().groundedRequests)
+    }
+
+    @Test
     fun zeroSecondsAreIgnored() {
         val counter = UsageCounter(MutableTime(evening), MemoryUsage(), zone = zone)
         counter.addLiveSeconds(0)

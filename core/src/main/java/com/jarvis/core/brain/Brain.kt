@@ -87,6 +87,10 @@ sealed class BrainResult {
         /** 16-bit little-endian mono PCM at 24 kHz, when the brain already spoke. */
         val audioPcm24k: ByteArray? = null,
         val followUp: LiveFollowUp? = null,
+        /** Short shelf label, such as the weather reading. Speech still uses [text]. */
+        val shelf: String? = null,
+        /** Google Search suggestions and sources. Null when the answer was not grounded. */
+        val search: SearchDisplay? = null,
     ) : BrainResult()
 
     data class Failure(

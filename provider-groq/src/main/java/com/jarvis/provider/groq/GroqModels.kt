@@ -13,6 +13,13 @@ object GroqModels {
 
     const val WHISPER = "whisper-large-v3-turbo"
 
+    /**
+     * groq/compound and groq/compound-mini were decommissioned on 2026-09-21.
+     * The Worker allowlist is only [CHAT], so a compound id would be rejected.
+     * Fresh questions therefore say live search is unavailable.
+     */
+    const val COMPOUND_SEARCH = false
+
     /** Stop a model here so the org stays under the 200K tokens/day cap. */
     const val DAILY_TOKEN_CAP = 180_000
     const val DAILY_TOKEN_LIMIT = 200_000

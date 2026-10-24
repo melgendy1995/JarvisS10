@@ -2,12 +2,15 @@ package com.jarvis.provider.gemini
 
 import com.google.firebase.ai.type.Content
 import com.google.firebase.ai.type.content
+import com.jarvis.core.JarvisLog
 import com.jarvis.core.brain.Brain
 import com.jarvis.core.brain.BrainAccent
 import com.jarvis.core.brain.BrainError
 import com.jarvis.core.brain.BrainRequest
 import com.jarvis.core.brain.BrainResult
+import com.jarvis.core.brain.Freshness
 import com.jarvis.core.brain.PromptFitter
+import com.jarvis.core.brain.SearchDisplay
 import com.jarvis.core.brain.Speaker
 import com.jarvis.core.skills.SkillRegistry
 import android.util.Log
@@ -32,6 +35,16 @@ class GeminiTextBrain(
 
     override suspend fun reply(request: BrainRequest): BrainResult {
         gate(id, configured, online, cooldown, time)?.let { return it }
+        if (Freshness.needsLiveInfo(request.utterance)) {
+            if (usage.tryAcquireGrounded()) {
+                return completeGrounded(request)
+            }
+            val used = usage.snapshot().groundedRequests
+            JarvisLog.i(
+                SEARCH,
+                "cap exhausted count=$used cap=${ModelConfig.DAILY_GROUNDED_CAP} fallback=normal",
+            )
+        }
         val models = listOf(ModelConfig.TEXT_MODEL, ModelConfig.TEXT_MODEL_FALLBACK).distinct()
         var last: BrainResult.Failure = BrainResult.Failure(id, BrainError.Unavailable)
         for ((index, model) in models.withIndex()) {
@@ -97,6 +110,7 @@ class GeminiTextBrain(
                     accent = accent,
                     text = text,
                     needsPermission = spoken.needsPermission,
+                    search = spoken.search,
                 )
             }
         } catch (timeout: TimeoutCancellationException) {
@@ -117,6 +131,91 @@ class GeminiTextBrain(
             }
             error.toBrainFailure(id, cooldown, time)
         }
+    }
+
+    /**
+     * One grounded call. A failure stays a failure so the chain can say search is down,
+     * instead of answering news from memory. The daily cap is the only path back to normal text.
+     */
+    private suspend fun completeGrounded(request: BrainRequest): BrainResult {
+        val model = ModelConfig.GROUNDING_MODEL
+        val count = usage.snapshot().groundedRequests
+        JarvisLog.i(SEARCH, "grounded begin model=$model count=$count")
+        Log.i(TAG, "text begin model=$model backend=${GeminiModels.BACKEND} grounding=search")
+        return try {
+            usage.recordTextRequest()
+            val spoken = withTimeout(GROUND_TIMEOUT_MS) {
+                withContext(Dispatchers.IO) {
+                    try {
+                        grounded(request, model)
+                    } catch (cancelled: CancellationException) {
+                        if (cancelled is TimeoutCancellationException) throw cancelled
+                        if (!currentCoroutineContext().isActive) throw cancelled
+                        throw TextCancelled(cancelled)
+                    }
+                }
+            }
+            val text = spoken.text.trim()
+            if (text.isEmpty()) {
+                Log.w(TAG, "text blank model=$model grounding=search")
+                JarvisLog.i(SEARCH, "grounded blank model=$model")
+                BrainResult.Failure(id, BrainError.Unavailable)
+            } else {
+                Log.i(TAG, "text result model=$model chars=${text.length} preview=${preview(text)}")
+                BrainResult.Answer(
+                    brainId = id,
+                    accent = accent,
+                    text = text,
+                    search = spoken.search,
+                )
+            }
+        } catch (timeout: TimeoutCancellationException) {
+            Log.w(TAG, "text timeout model=$model ms=$GROUND_TIMEOUT_MS", timeout)
+            JarvisLog.i(SEARCH, "grounded timeout model=$model")
+            BrainResult.Failure(id, BrainError.Unavailable)
+        } catch (wrapped: TextCancelled) {
+            val cause = wrapped.cause ?: wrapped
+            Log.w(TAG, "text cancelled model=$model ${cause.causeChain()}", cause)
+            BrainResult.Failure(id, BrainError.Unavailable)
+        } catch (cancelled: CancellationException) {
+            if (!currentCoroutineContext().isActive) throw cancelled
+            Log.w(TAG, "text cancelled model=$model ${cancelled.causeChain()}", cancelled)
+            BrainResult.Failure(id, BrainError.Unavailable)
+        } catch (error: Throwable) {
+            if (error.isModelRejected()) {
+                Log.w(TAG, "text model not found model=$model ${error.causeChain()}", error)
+            }
+            error.toBrainFailure(id, cooldown, time)
+        }
+    }
+
+    private suspend fun grounded(request: BrainRequest, model: String): Spoken {
+        val fitter = PromptFitter()
+        val assembled = fitter.memorySystem(
+            baseSystem = ModelConfig.SYSTEM_PROMPT,
+            persona = request.persona,
+            facts = request.facts,
+            summary = request.summary,
+            charBudget = PromptFitter.GEMINI_SYSTEM_CHARS,
+        )
+        val fitted = fitter.fit(assembled, request.turns, request.utterance)
+        val system = fitted.system.ifBlank { ModelConfig.SYSTEM_PROMPT } + "\n" + GROUNDING_NOTE
+        val generative = GeminiModels.grounded(system, model)
+        val history = mutableListOf<Content>()
+        for (turn in fitted.turns) {
+            val role = if (turn.speaker == Speaker.USER) "user" else "model"
+            history += content(role) { text(turn.text) }
+        }
+        if (history.isEmpty()) history += content("user") { text(request.utterance) }
+        val response = generative.generateContent(history)
+        val bits = response.toGroundedSpeech()
+        val domainList = bits.domains.joinToString(",").ifBlank { "none" }
+        JarvisLog.i(
+            SEARCH,
+            "grounded done model=$model domains=$domainList queries=${bits.queries} " +
+                "suggestions=${if (bits.suggestions) "yes" else "no"} sources=${bits.search?.sources?.size ?: 0}",
+        )
+        return Spoken(bits.text, null, bits.search)
     }
 
     private suspend fun complete(request: BrainRequest, model: String): Spoken {
@@ -167,7 +266,11 @@ class GeminiTextBrain(
         return Spoken(text, permission)
     }
 
-    private data class Spoken(val text: String, val needsPermission: String?)
+    private data class Spoken(
+        val text: String,
+        val needsPermission: String?,
+        val search: SearchDisplay? = null,
+    )
 
     /** A child socket cancelled itself. This is not a cancelled question. */
     private class TextCancelled(cause: CancellationException) : Exception(cause.message, cause)
@@ -176,11 +279,17 @@ class GeminiTextBrain(
 
     companion object {
         const val ID = "gemini-text"
+        private const val SEARCH = "JarvisSearch"
         private const val TEXT_TIMEOUT_MS = 8_000L
+        private const val GROUND_TIMEOUT_MS = 25_000L
         private const val MAX_TOOL_ROUNDS = 4
         private const val SUMMARY_SYSTEM =
             "Summarize the conversation memory in a few short sentences. " +
                 "Reply with the summary only. Do not use tools."
+        private const val GROUNDING_NOTE =
+            "Google Search is available for this turn. There are no phone tools on this turn. " +
+            "Search before you answer. Reply in one or two short spoken sentences in the user's language. " +
+            "Do not include URLs, markdown, asterisks, or citation numbers."
     }
 }
 

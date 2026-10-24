@@ -135,9 +135,11 @@ fun JarvisScreen(viewModel: JarvisViewModel) {
                 }
                 ShelfPanel(
                     now = now,
-                    weather = null,
+                    weather = ui.weatherLabel?.let { WeatherState(it) },
                     you = ui.you,
                     reply = ui.reply,
+                    sources = ui.sources,
+                    searchHtml = ui.searchHtml,
                     brain = ui.brain,
                     night = night,
                     accessibilityHint = accessibilityHint(),

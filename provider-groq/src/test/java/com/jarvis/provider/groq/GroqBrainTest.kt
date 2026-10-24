@@ -119,6 +119,17 @@ class GroqBrainTest {
     }
 
     @Test
+    fun freshQuestionSaysSearchIsUnavailableWithoutCallingGroq() = runBlocking {
+        assertFalse(GroqModels.COMPOUND_SEARCH)
+        val english = brain.reply(BrainRequest("what's the latest news about Saudi Arabia")) as BrainResult.Answer
+        val arabic = brain.reply(BrainRequest("ما آخر أخبار السعودية")) as BrainResult.Answer
+        assertEquals(GroqBrain.UNAVAILABLE_EN, english.text)
+        assertEquals(GroqBrain.UNAVAILABLE_AR, arabic.text)
+        assertTrue(transport.chats.isEmpty())
+        assertTrue(logs.any { it.contains("live search unavailable") })
+    }
+
+    @Test
     fun handoffSendsPriorTurnsAndStaysInsideTheTokenBudget() = runBlocking {
         transport.handler = {
             GroqChatResult.Ok(AssistantMessage("The second one.", emptyList()), totalTokens = 40)

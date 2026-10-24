@@ -8,6 +8,7 @@ data class Usage(
     val liveTurns: Int = 0,
     val liveSeconds: Long = 0,
     val textRequests: Int = 0,
+    val groundedRequests: Int = 0,
 )
 
 interface UsageStore {
@@ -24,6 +25,7 @@ class UsageCounter(
     private val store: UsageStore,
     private val zone: ZoneId = ModelConfig.ZONE,
     private val liveTurnCap: Int = ModelConfig.DAILY_LIVE_TURN_CAP,
+    private val groundedCap: Int = ModelConfig.DAILY_GROUNDED_CAP,
 ) {
     private val lock = Any()
 
@@ -39,6 +41,18 @@ class UsageCounter(
     }
 
     fun recordTextRequest() = mutate { it.copy(textRequests = it.textRequests + 1) }
+
+    fun groundedCapReached(): Boolean = synchronized(lock) {
+        today().groundedRequests >= groundedCap
+    }
+
+    /** Reserves one grounded call for today. False when [groundedCap] is already used. */
+    fun tryAcquireGrounded(): Boolean = synchronized(lock) {
+        val current = today()
+        if (current.groundedRequests >= groundedCap) return false
+        store.write(current.copy(groundedRequests = current.groundedRequests + 1))
+        true
+    }
 
     private fun mutate(block: (Usage) -> Usage) {
         synchronized(lock) {

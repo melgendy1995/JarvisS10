@@ -2,8 +2,10 @@ package com.jarvis.app
 
 import android.app.Application
 import android.util.Log
+import com.jarvis.app.system.AndroidCoarseLocation
 import com.jarvis.app.system.AppTimerScheduler
 import com.jarvis.app.system.CameraTorchController
+import com.jarvis.app.system.OpenMeteoClient
 import com.jarvis.core.CommandRouter
 import com.jarvis.core.brain.BrainChain
 import com.jarvis.core.brain.BrainResult
@@ -14,6 +16,7 @@ import com.jarvis.core.skills.MemorySkill
 import com.jarvis.core.skills.SkillRegistry
 import com.jarvis.core.skills.TimeSkill
 import com.jarvis.core.skills.TimerSkill
+import com.jarvis.core.skills.WeatherSkill
 import com.jarvis.data.JarvisDatabase
 import com.jarvis.data.MemoryLimits
 import com.jarvis.data.MemoryRepository
@@ -101,6 +104,7 @@ class JarvisApplication : Application() {
         }
         val registry = SkillRegistry()
         registry.register(TimeSkill())
+        registry.register(WeatherSkill(OpenMeteoClient(), AndroidCoarseLocation(this)))
         registry.register(TimerSkill(timers))
         registry.register(FlashlightSkill(CameraTorchController(this)))
         registry.register(MemorySkill(RoomMemory(memory)))

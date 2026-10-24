@@ -27,6 +27,7 @@ import com.jarvis.core.brain.ConversationTurn
 import com.jarvis.core.brain.LiveEvent
 import com.jarvis.core.brain.LiveFollowUp
 import com.jarvis.core.brain.MemoryFact
+import com.jarvis.core.brain.SearchSource
 import com.jarvis.core.brain.Speaker
 import com.jarvis.data.Channels
 import com.jarvis.data.FallbackMemory
@@ -75,6 +76,9 @@ data class JarvisUiState(
     val personaOpen: Boolean = false,
     val personaName: String = "Mahmoud",
     val personaText: String = "",
+    val weatherLabel: String? = null,
+    val sources: List<SearchSource> = emptyList(),
+    val searchHtml: String? = null,
 )
 
 sealed interface JarvisEvent {
@@ -257,6 +261,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 level = 0f,
                 you = "",
                 reply = "",
+                sources = emptyList(),
+                searchHtml = null,
             )
         }
         WakeLog.state("HOLDING")
@@ -462,6 +468,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 holding = false,
                 accent = BrainAccent.PHONE,
                 brain = "",
+                sources = emptyList(),
+                searchHtml = null,
             )
         }
         val result = try {
@@ -501,7 +509,15 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             is BrainResult.Answer -> {
                 val accent = result.accent.toOrb()
                 result.needsPermission?.let { request(it) }
-                _ui.update { it.copy(accent = accent, brain = result.accent.label) }
+                _ui.update {
+                    it.copy(
+                        accent = accent,
+                        brain = result.accent.label,
+                        weatherLabel = result.shelf ?: it.weatherLabel,
+                        sources = result.search?.sources.orEmpty(),
+                        searchHtml = result.search?.suggestionsHtml,
+                    )
+                }
                 if (result.audioPcm24k != null || result.followUp != null) {
                     liveActive = true
                     var didLiveFollow = false

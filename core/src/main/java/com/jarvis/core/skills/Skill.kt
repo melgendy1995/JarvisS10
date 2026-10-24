@@ -26,6 +26,8 @@ data class SkillCall(
 data class SkillResult(
     val text: String,
     val success: Boolean = true,
-    /** Android permission name to request before the skill can run, when set. */
+    /** Android permission to request. The skill may still return [text] when this is set. */
     val needsPermission: String? = null,
+    /** One-line shelf label. The spoken answer stays in [text]. */
+    val shelf: String? = null,
 )

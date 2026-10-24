@@ -1,11 +1,13 @@
 package com.jarvis.provider.groq
 
+import com.jarvis.core.JarvisLog
 import com.jarvis.core.brain.Brain
 import com.jarvis.core.brain.BrainAccent
 import com.jarvis.core.brain.BrainError
 import com.jarvis.core.brain.BrainRequest
 import com.jarvis.core.brain.BrainResult
 import com.jarvis.core.brain.FittedPrompt
+import com.jarvis.core.brain.Freshness
 import com.jarvis.core.brain.PromptFitter
 import com.jarvis.core.brain.Speaker
 import com.jarvis.core.skills.SkillCall
@@ -41,6 +43,9 @@ class GroqBrain(
     fun hasCapacity(): Boolean = configured() && rotation.hasAvailableModel()
 
     override suspend fun reply(request: BrainRequest): BrainResult {
+        if (Freshness.needsLiveInfo(request.utterance) && !GroqModels.COMPOUND_SEARCH) {
+            return liveSearchUnavailable(request)
+        }
         val proxyReady = GroqProxy.normalize(proxyUrl()) != null
         val bearerReady = bearerPresent()
         val onlineNow = try {
@@ -68,6 +73,14 @@ class GroqBrain(
             log("reply failed: ${error.javaClass.simpleName}")
             BrainResult.Failure(id, BrainError.Unavailable)
         }
+    }
+
+    private fun liveSearchUnavailable(request: BrainRequest): BrainResult {
+        val arabic = request.utterance.any { it in '\u0600'..'\u06FF' }
+        val text = if (arabic) UNAVAILABLE_AR else UNAVAILABLE_EN
+        JarvisLog.i("JarvisSearch", "live search unavailable reason=compound-decommissioned worker=allowlist")
+        log("live search unavailable")
+        return BrainResult.Answer(brainId = id, accent = accent, text = text)
     }
 
     private fun bearerPresent(): Boolean {
@@ -324,6 +337,8 @@ class GroqBrain(
 
     companion object {
         const val ID = "groq"
+        const val UNAVAILABLE_EN = "Live search is unavailable right now."
+        const val UNAVAILABLE_AR = "البحث المباشر غير متاح الآن."
         private val UUID = Regex(
             "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
         )
