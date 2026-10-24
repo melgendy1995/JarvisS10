@@ -27,6 +27,7 @@ class PlaybackMonitor(
     private val uids = HashMap<String, Int>()
     private var awayPackage: String? = null
     private var sawStarted = false
+    private var userPaused = false
     private var busy = false
     private var generation = 0
     private var keepGeneration = 0
@@ -57,7 +58,18 @@ class PlaybackMonitor(
     fun disarm() {
         awayPackage = null
         sawStarted = false
+        userPaused = false
         generation++
+    }
+
+    /**
+     * YouTube on this phone drops the player on pause instead of reporting state:paused.
+     * That used to look like the video ending, so Jarvis pulled itself forward and a
+     * following play command had no session left.
+     */
+    fun noteUserPaused(paused: Boolean) {
+        userPaused = paused
+        if (paused) generation++
     }
 
     /** Re-sends play if speech focus paused a video we just started. */
@@ -129,11 +141,11 @@ class PlaybackMonitor(
             sawStarted = true
             return
         }
-        if (!sawStarted || paused) return
+        if (!playbackEnded(sawStarted, started = false, paused = paused, userPaused = userPaused)) return
         val token = generation
         handler.postDelayed({
             if (token != generation || busy || awayPackage != pkg) return@postDelayed
-            if (!isStarted(pkg) && !isPaused(pkg)) {
+            if (playbackEnded(sawStarted, isStarted(pkg), isPaused(pkg), userPaused)) {
                 Log.i(TAG, "playback stopped package=$pkg")
                 disarm()
                 onPlaybackStopped(pkg)
@@ -205,3 +217,11 @@ class PlaybackMonitor(
         val STATE: Regex = Regex("""\bstate:(\w+)""")
     }
 }
+
+/** True when a watched player has gone, rather than paused or held by a voice pause. */
+internal fun playbackEnded(
+    sawStarted: Boolean,
+    started: Boolean,
+    paused: Boolean,
+    userPaused: Boolean,
+): Boolean = sawStarted && !started && !paused && !userPaused

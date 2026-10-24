@@ -240,6 +240,7 @@ class AndroidAppControl(context: Context) : AppControl {
         val arabic = slots["lang"] == "ar"
         playback.cancelKeep()
         val which = slots["media"].orEmpty()
+        if (which == "pause") playback.noteUserPaused(true) else playback.noteUserPaused(false)
         val key = when (which) {
             "pause" -> KeyEvent.KEYCODE_MEDIA_PAUSE
             "resume" -> KeyEvent.KEYCODE_MEDIA_PLAY
