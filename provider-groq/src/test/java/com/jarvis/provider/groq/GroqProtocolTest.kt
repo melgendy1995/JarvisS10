@@ -55,6 +55,81 @@ class GroqProtocolTest {
     }
 
     @Test
+    fun browserSearchBodyIsGptOssShapeWithoutFunctionTools() {
+        val body = GroqProtocol.chatBody(
+            GroqChatRequest(
+                model = "openai/gpt-oss-120b",
+                messages = listOf(OutgoingMessage(role = "user", content = "latest news")),
+                tools = emptyList(),
+                browserSearch = true,
+            ),
+        )
+        assertTrue(body.contains(""""type":"browser_search""""))
+        assertTrue(body.contains(""""tool_choice":"required""""))
+        assertTrue(body.contains(""""reasoning_effort":"low""""))
+        assertTrue(body.contains(""""max_completion_tokens":1024"""))
+        assertFalse(body.contains("function"))
+        assertEquals(1024, GroqModels.BROWSER_MAX_TOKENS)
+        assertEquals(100, GroqModels.BROWSER_DAILY_CAP)
+    }
+
+    @Test
+    fun browserErrorsNameQuotaPlanAndPermission() {
+        val quota = GroqProtocol.classifyBrowser(
+            429,
+            """{"error":"browser daily limit"}""",
+        ) as GroqChatResult.SearchDenied
+        assertEquals("quota", quota.reason)
+        assertTrue(quota.localCap)
+
+        val plan = GroqProtocol.classifyBrowser(
+            403,
+            """{"error":{"message":"browser_search is not available on your plan"}}""",
+        ) as GroqChatResult.SearchDenied
+        assertEquals("plan", plan.reason)
+        assertFalse(plan.localCap)
+
+        val permission = GroqProtocol.classifyBrowser(
+            403,
+            """{"error":"browser_search not allowed"}""",
+        ) as GroqChatResult.SearchDenied
+        assertEquals("permission", permission.reason)
+
+        val hits = GroqProtocol.parseSearch(
+            """{"items":[{"title":"Cabinet","source":"Arab News","date":"24 Oct 2026","link":"https://arabnews.com/a","kind":"news","extract":"Met today"}]}""",
+        )
+        assertEquals("Cabinet", hits.single().title)
+        assertEquals("Arab News", hits.single().source)
+        assertEquals("Met today", hits.single().extract)
+    }
+
+    @Test
+    fun searchPostGoesToTheWorkerWithTheBearer() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"items":[{"title":"Headline","source":"Reuters","date":"24 Oct 2026","link":"https://reuters.com/a","kind":"news"}]}""",
+            ),
+        )
+        server.start()
+        try {
+            val transport = OkHttpGroqTransport(
+                client = OkHttpClient(),
+                proxyUrl = { server.url("/").toString().trimEnd('/') },
+                bearer = { "test-bearer" },
+            )
+            val result = transport.search("latest news about Saudi Arabia") as LiveSearchResult.Ok
+            val recorded = server.takeRequest()
+            assertEquals("Bearer test-bearer", recorded.getHeader("Authorization"))
+            assertTrue(recorded.path!!.endsWith("/search"))
+            assertTrue(recorded.body.readUtf8().contains("latest news about Saudi Arabia"))
+            assertEquals("Reuters", result.items.single().source)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun wavHeaderWrapsSixteenKilohertzPcm() {
         val pcm = ByteArray(320) { it.toByte() }
         val wav = WavPcm.encode(pcm, 16_000)

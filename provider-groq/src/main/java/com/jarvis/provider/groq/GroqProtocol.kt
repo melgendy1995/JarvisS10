@@ -28,7 +28,26 @@ data class GroqChatRequest(
     val model: String,
     val messages: List<OutgoingMessage>,
     val tools: List<JsonObject>,
+    /** Server-side Groq browser search. Function tools are not sent with this. */
+    val browserSearch: Boolean = false,
+    val maxCompletionTokens: Int? = null,
+    val reasoningEffort: String? = null,
 )
+
+data class LiveHit(
+    val title: String,
+    val source: String,
+    val date: String,
+    val link: String,
+    val kind: String = "",
+    val extract: String = "",
+)
+
+sealed class LiveSearchResult {
+    data class Ok(val items: List<LiveHit>) : LiveSearchResult()
+    data object Limited : LiveSearchResult()
+    data object Unavailable : LiveSearchResult()
+}
 
 data class AssistantMessage(
     val content: String?,
@@ -40,6 +59,15 @@ sealed class GroqChatResult {
     data class Limited(val retryAfter: Duration?, val daily: Boolean) : GroqChatResult()
     data object NotConfigured : GroqChatResult()
     data object Unavailable : GroqChatResult()
+
+    /**
+     * Browser search cannot run. [reason] is quota, plan, or permission.
+     * [localCap] is the Worker daily cap, not a Groq model limit.
+     */
+    data class SearchDenied(
+        val reason: String,
+        val localCap: Boolean = false,
+    ) : GroqChatResult()
 }
 
 sealed class GroqTranscript {
@@ -68,11 +96,74 @@ object GroqProtocol {
         return buildJsonObject {
             put("model", JsonPrimitive(request.model))
             put("messages", JsonArray(request.messages.map { it.toJson() }))
-            if (request.tools.isNotEmpty()) {
-                put("tools", JsonArray(request.tools))
-                put("tool_choice", JsonPrimitive("auto"))
+            if (request.browserSearch) {
+                put("max_completion_tokens", JsonPrimitive(GroqModels.BROWSER_MAX_TOKENS))
+                put("reasoning_effort", JsonPrimitive("low"))
+                put("tool_choice", JsonPrimitive("required"))
+                put("tools", buildJsonArray {
+                    add(buildJsonObject { put("type", JsonPrimitive("browser_search")) })
+                })
+            } else {
+                if (request.maxCompletionTokens != null) {
+                    put("max_completion_tokens", JsonPrimitive(request.maxCompletionTokens))
+                }
+                if (!request.reasoningEffort.isNullOrBlank()) {
+                    put("reasoning_effort", JsonPrimitive(request.reasoningEffort))
+                }
+                if (request.tools.isNotEmpty()) {
+                    put("tools", JsonArray(request.tools))
+                    put("tool_choice", JsonPrimitive("auto"))
+                }
             }
         }.toString()
+    }
+
+    /** Quota, plan, and permission failures stay distinct from a bad Worker bearer. */
+    fun classifyBrowser(status: Int, body: String): GroqChatResult {
+        if (status == 401) return GroqChatResult.NotConfigured
+        val text = body.lowercase()
+        val localCap = text.contains("browser daily limit") || text.contains("proxy daily limit")
+        val quota = status == 429 ||
+            text.contains("quota") ||
+            text.contains("rate_limit") ||
+            text.contains("rate limit") ||
+            text.contains("daily limit") ||
+            text.contains("tokens per")
+        val plan = status == 402 ||
+            text.contains("plan") ||
+            text.contains("billing") ||
+            text.contains("upgrade") ||
+            text.contains("payment required")
+        val permission = status == 403 ||
+            text.contains("permission") ||
+            text.contains("not authorized") ||
+            text.contains("not allowed") ||
+            text.contains("access denied") ||
+            text.contains("does not support browser")
+        if (quota && !plan) return GroqChatResult.SearchDenied("quota", localCap)
+        if (plan) return GroqChatResult.SearchDenied("plan", localCap)
+        if (permission) return GroqChatResult.SearchDenied("permission", localCap)
+        if (status !in 200..299) return GroqChatResult.Unavailable
+        val message = parseAssistant(body) ?: return GroqChatResult.Unavailable
+        if (message.content.isNullOrBlank()) return GroqChatResult.Unavailable
+        return GroqChatResult.Ok(message, parseTotalTokens(body))
+    }
+
+    fun parseSearch(body: String): List<LiveHit> {
+        val root = runCatching { json.parseToJsonElement(body) }.getOrNull() as? JsonObject ?: return emptyList()
+        val items = root["items"] as? JsonArray ?: return emptyList()
+        return items.mapNotNull { element ->
+            val obj = element as? JsonObject ?: return@mapNotNull null
+            val title = text(obj, "title") ?: return@mapNotNull null
+            LiveHit(
+                title = title,
+                source = text(obj, "source").orEmpty(),
+                date = text(obj, "date").orEmpty(),
+                link = text(obj, "link").orEmpty(),
+                kind = text(obj, "kind").orEmpty(),
+                extract = text(obj, "extract").orEmpty(),
+            )
+        }
     }
 
     fun classifyChat(status: Int, retryAfterHeader: String?, body: String): GroqChatResult {
@@ -139,6 +230,10 @@ object GroqProtocol {
             ToolCallSpec(id, name, arguments)
         }
         return AssistantMessage(content, calls)
+    }
+
+    private fun text(obj: JsonObject, key: String): String? {
+        return (obj[key] as? JsonPrimitive)?.contentOrNull?.trim()?.ifBlank { null }
     }
 
     private fun parseTotalTokens(body: String): Int? {

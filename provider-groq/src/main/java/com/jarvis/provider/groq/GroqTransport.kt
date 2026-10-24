@@ -4,6 +4,7 @@ import android.util.Log
 import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +18,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 interface GroqTransport {
     suspend fun complete(request: GroqChatRequest): GroqChatResult
     suspend fun transcribe(wav: ByteArray): GroqTranscript
+    suspend fun search(query: String): LiveSearchResult
 }
 
 fun groqTransport(proxyUrl: () -> String, bearer: () -> String): GroqTransport {
@@ -52,7 +54,32 @@ internal class OkHttpGroqTransport(
             .post(GroqProtocol.chatBody(request).toRequestBody(JSON))
             .build()
         return execute(http, GroqChatResult.Unavailable) { status, retryAfter, body ->
-            GroqProtocol.classifyChat(status, retryAfter, body)
+            if (request.browserSearch) {
+                GroqProtocol.classifyBrowser(status, body)
+            } else {
+                GroqProtocol.classifyChat(status, retryAfter, body)
+            }
+        }
+    }
+
+    override suspend fun search(query: String): LiveSearchResult {
+        val endpoint = endpoint("/search") ?: return LiveSearchResult.Unavailable
+        val payload = buildJsonObject { put("q", JsonPrimitive(query.take(240))) }.toString()
+        val http = Request.Builder()
+            .url(endpoint)
+            .header("Authorization", "Bearer ${bearer().trim()}")
+            .header("Accept", "application/json")
+            .post(payload.toRequestBody(JSON))
+            .build()
+        return execute(http, LiveSearchResult.Unavailable) { status, _, body ->
+            when {
+                status == 429 -> LiveSearchResult.Limited
+                status !in 200..299 -> LiveSearchResult.Unavailable
+                else -> {
+                    val items = GroqProtocol.parseSearch(body)
+                    if (items.isEmpty()) LiveSearchResult.Unavailable else LiveSearchResult.Ok(items)
+                }
+            }
         }
     }
 
@@ -84,10 +111,21 @@ internal class OkHttpGroqTransport(
         val root = runCatching {
             kotlinx.serialization.json.Json.parseToJsonElement(body)
         }.getOrNull() as? JsonObject ?: return ""
-        val reason = (root["error"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
-        if (reason.length !in 1..48 || reason.any { it.isISOControl() }) return ""
-        if (reason.contains("gsk_", ignoreCase = true) || reason.contains("bearer ", ignoreCase = true)) return ""
-        return reason
+        val error = root["error"]
+        val raw = when (error) {
+            is JsonPrimitive -> error.contentOrNull
+            is JsonObject -> (error["message"] as? JsonPrimitive)?.contentOrNull
+                ?: (error["code"] as? JsonPrimitive)?.contentOrNull
+            else -> null
+        }?.trim().orEmpty()
+        val reason = raw
+            .replace(Regex("""gsk_[A-Za-z0-9_\-]+"""), "gsk_[redacted]")
+            .replace(Regex("""Bearer\s+\S+""", RegexOption.IGNORE_CASE), "Bearer [redacted]")
+            .replace(Regex("""tvly-[A-Za-z0-9_\-]+"""), "[redacted]")
+            .replace(Regex("""BSA[A-Za-z0-9_\-]{8,}"""), "[redacted]")
+            .replace(Regex("""\s+"""), " ")
+        if (reason.isEmpty() || reason.any { it.isISOControl() }) return ""
+        return reason.take(180)
     }
 
     private fun endpoint(path: String): String? {

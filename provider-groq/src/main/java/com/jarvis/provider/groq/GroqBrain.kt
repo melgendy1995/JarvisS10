@@ -9,7 +9,10 @@ import com.jarvis.core.brain.BrainResult
 import com.jarvis.core.brain.FittedPrompt
 import com.jarvis.core.brain.Freshness
 import com.jarvis.core.brain.PromptFitter
+import com.jarvis.core.brain.SearchDisplay
+import com.jarvis.core.brain.SearchSource
 import com.jarvis.core.brain.Speaker
+import com.jarvis.core.brain.SpokenText
 import com.jarvis.core.skills.SkillCall
 import com.jarvis.core.skills.SkillRegistry
 import com.jarvis.core.skills.SkillResult
@@ -43,9 +46,210 @@ class GroqBrain(
     fun hasCapacity(): Boolean = configured() && rotation.hasAvailableModel()
 
     override suspend fun reply(request: BrainRequest): BrainResult {
-        if (Freshness.needsLiveInfo(request.utterance) && !GroqModels.COMPOUND_SEARCH) {
-            return liveSearchUnavailable(request)
+        if (Freshness.needsLiveInfo(request.utterance)) {
+            return replyFresh(request)
         }
+        return replyChat(request)
+    }
+
+    /**
+     * Gemini grounding already failed or was capped. Browser search is next,
+     * then Worker results phrased only from those hits.
+     */
+    private suspend fun replyFresh(request: BrainRequest): BrainResult {
+        val gate = readiness()
+        if (gate != null) return gate
+        val browsed = browse(request)
+        if (browsed != null) return browsed
+        val found = try {
+            transport.search(request.utterance)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            log("search failed: ${error.javaClass.simpleName}")
+            LiveSearchResult.Unavailable
+        }
+        if (found is LiveSearchResult.Ok) {
+            val phrased = phrase(request, found.items)
+            if (phrased != null) return phrased
+            return sourced(request, found.items)
+        }
+        val reason = if (found is LiveSearchResult.Limited) "daily-cap" else "unavailable"
+        JarvisLog.i("JarvisSearch", "search skipped reason=$reason")
+        log("search skipped reason=$reason")
+        return liveSearchUnavailable(request, "all-paths-failed")
+    }
+
+    private suspend fun browse(request: BrainRequest): BrainResult.Answer? {
+        var stop = false
+        for (model in GroqModels.BROWSER_SEARCH) {
+            if (stop) break
+            if (!rotation.isAvailable(model)) {
+                log("browser skip cooling model=$model")
+                continue
+            }
+            val result = try {
+                transport.complete(browserRequest(model, request))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                log("browser failed: ${error.javaClass.simpleName}")
+                GroqChatResult.Unavailable
+            }
+            when (result) {
+                is GroqChatResult.Ok -> {
+                    val text = brief(result.message.content.orEmpty())
+                    if (text.isBlank() || isSearchRefusal(text)) {
+                        log("browser blank model=$model")
+                        continue
+                    }
+                    rotation.recordTokens(model, result.totalTokens ?: 1)
+                    JarvisLog.i("JarvisSearch", "path=browser model=$model")
+                    log("path=browser model=$model")
+                    return BrainResult.Answer(
+                        brainId = id,
+                        accent = accent,
+                        text = text,
+                        search = sourcesFromText(result.message.content.orEmpty()),
+                    )
+                }
+                is GroqChatResult.SearchDenied -> {
+                    JarvisLog.i(
+                        "JarvisSearch",
+                        "browser_search skipped model=$model reason=${result.reason} localCap=${result.localCap}",
+                    )
+                    log("browser_search skipped model=$model reason=${result.reason}")
+                    if (result.reason == "quota" && !result.localCap) {
+                        rotation.coolUntil(model, clock.now().plusSeconds(GroqModels.TPM_COOLDOWN_SECONDS))
+                    } else {
+                        stop = true
+                    }
+                }
+                is GroqChatResult.Limited -> {
+                    JarvisLog.i("JarvisSearch", "browser_search skipped model=$model reason=quota")
+                    log("browser_search skipped model=$model reason=quota")
+                    rotation.coolUntil(model, cooldownUntil(Turn.Limited(result.retryAfter, result.daily)))
+                }
+                GroqChatResult.NotConfigured -> {
+                    JarvisLog.i("JarvisSearch", "browser_search skipped model=$model reason=permission")
+                    log("browser_search skipped model=$model reason=permission")
+                    stop = true
+                }
+                GroqChatResult.Unavailable -> {
+                    JarvisLog.i("JarvisSearch", "browser_search skipped model=$model reason=unavailable")
+                    log("browser_search skipped model=$model reason=unavailable")
+                }
+            }
+        }
+        return null
+    }
+
+    private suspend fun phrase(request: BrainRequest, items: List<LiveHit>): BrainResult.Answer? {
+        val prompt = resultsPrompt(request.utterance, items)
+        for (model in GroqModels.BROWSER_SEARCH) {
+            if (!rotation.isAvailable(model)) continue
+            val result = try {
+                transport.complete(
+                    GroqChatRequest(
+                        model = model,
+                        messages = listOf(
+                            OutgoingMessage(role = "system", content = PHRASE_SYSTEM),
+                            OutgoingMessage(role = "user", content = prompt),
+                        ),
+                        tools = emptyList(),
+                        maxCompletionTokens = 256,
+                        reasoningEffort = "low",
+                    ),
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                log("phrase failed: ${error.javaClass.simpleName}")
+                return null
+            }
+            when (result) {
+                is GroqChatResult.Ok -> {
+                    val text = SpokenText.forSpeech(result.message.content.orEmpty())
+                    if (text.isBlank() || isSearchRefusal(text)) {
+                        log("phrase refused model=$model")
+                        continue
+                    }
+                    rotation.recordTokens(model, result.totalTokens ?: 1)
+                    JarvisLog.i("JarvisSearch", "path=search model=$model items=${items.size}")
+                    log("path=search model=$model items=${items.size}")
+                    return BrainResult.Answer(
+                        brainId = id,
+                        accent = accent,
+                        text = text,
+                        search = display(items),
+                    )
+                }
+                is GroqChatResult.Limited -> {
+                    log("phrase limited model=$model")
+                    rotation.coolUntil(model, cooldownUntil(Turn.Limited(result.retryAfter, result.daily)))
+                }
+                else -> log("phrase unavailable model=$model")
+            }
+        }
+        return null
+    }
+
+    private fun sourced(request: BrainRequest, items: List<LiveHit>): BrainResult.Answer {
+        val hit = items.first()
+        val arabic = request.utterance.any { it in '\u0600'..'\u06FF' }
+        val source = hit.source.ifBlank { if (arabic) "الخبر" else "the news" }
+        val whenText = hit.date.ifBlank { if (arabic) "اليوم" else "today" }
+        val text = if (arabic) {
+            "من $source بتاريخ $whenText: ${hit.title}."
+        } else {
+            "From $source on $whenText: ${hit.title}."
+        }
+        JarvisLog.i("JarvisSearch", "path=search-direct items=${items.size}")
+        log("path=search-direct items=${items.size}")
+        return BrainResult.Answer(
+            brainId = id,
+            accent = accent,
+            text = text,
+            search = display(items),
+        )
+    }
+
+    private fun readiness(): BrainResult? {
+        val proxyReady = GroqProxy.normalize(proxyUrl()) != null
+        val bearerReady = bearerPresent()
+        val onlineNow = try {
+            online()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            log("online check failed: ${error.javaClass.simpleName}")
+            false
+        }
+        log("fresh proxy=$proxyReady bearer=$bearerReady online=$onlineNow")
+        if (!proxyReady || !bearerReady) {
+            log("skip not configured")
+            return BrainResult.Failure(id, BrainError.NotConfigured)
+        }
+        if (!onlineNow) {
+            log("skip offline")
+            return BrainResult.Failure(id, BrainError.Unavailable)
+        }
+        return null
+    }
+
+    private fun browserRequest(model: String, request: BrainRequest): GroqChatRequest {
+        return GroqChatRequest(
+            model = model,
+            messages = listOf(
+                OutgoingMessage(role = "system", content = BROWSER_SYSTEM),
+                OutgoingMessage(role = "user", content = request.utterance),
+            ),
+            tools = emptyList(),
+            browserSearch = true,
+        )
+    }
+
+    private suspend fun replyChat(request: BrainRequest): BrainResult {
         val proxyReady = GroqProxy.normalize(proxyUrl()) != null
         val bearerReady = bearerPresent()
         val onlineNow = try {
@@ -75,12 +279,68 @@ class GroqBrain(
         }
     }
 
-    private fun liveSearchUnavailable(request: BrainRequest): BrainResult {
+    private fun liveSearchUnavailable(request: BrainRequest, reason: String): BrainResult {
         val arabic = request.utterance.any { it in '\u0600'..'\u06FF' }
         val text = if (arabic) UNAVAILABLE_AR else UNAVAILABLE_EN
-        JarvisLog.i("JarvisSearch", "live search unavailable reason=compound-decommissioned worker=allowlist")
-        log("live search unavailable")
+        JarvisLog.i("JarvisSearch", "live search unavailable reason=$reason")
+        log("live search unavailable reason=$reason")
         return BrainResult.Answer(brainId = id, accent = accent, text = text)
+    }
+
+    private fun resultsPrompt(utterance: String, items: List<LiveHit>): String {
+        val lines = items.mapIndexed { index, hit ->
+            val extract = hit.extract.trim()
+            val head = "${index + 1}. ${hit.title} — ${hit.source} — ${hit.date}"
+            if (extract.isEmpty()) head else "$head\n$extract"
+        }
+        return "Question: ${utterance.trim()}\n\nResults:\n${lines.joinToString("\n")}"
+    }
+
+    private fun display(items: List<LiveHit>): SearchDisplay? {
+        val sources = items.mapNotNull { hit ->
+            val link = hit.link.trim()
+            if (!link.startsWith("http")) return@mapNotNull null
+            val title = hit.source.ifBlank { hit.title }.ifBlank { "source" }
+            SearchSource(title = title, uri = link)
+        }.take(4)
+        if (sources.isEmpty()) return null
+        return SearchDisplay(sources = sources)
+    }
+
+    private fun sourcesFromText(raw: String): SearchDisplay? {
+        val urls = URLS.findAll(raw).map { it.value.trimEnd('.', ',', ';', ')') }.distinct().take(4).toList()
+        if (urls.isEmpty()) return null
+        return SearchDisplay(
+            sources = urls.map { url ->
+                val host = runCatching { java.net.URI(url).host }
+                    .getOrNull()
+                    ?.removePrefix("www.")
+                    ?.ifBlank { null }
+                    ?: "source"
+                SearchSource(title = host, uri = url)
+            },
+        )
+    }
+
+    private fun brief(raw: String): String {
+        val clean = SpokenText.forSpeech(raw)
+        if (clean.length <= 420) return clean
+        val parts = clean.split(Regex("""(?<=[.!?])\s+""")).filter { it.isNotBlank() }
+        val tail = parts.takeLast(2).joinToString(" ")
+        return tail.ifBlank { clean.take(420) }
+    }
+
+    private fun isSearchRefusal(text: String): Boolean {
+        val folded = text.lowercase()
+        return folded.contains("can't search") ||
+            folded.contains("cannot search") ||
+            folded.contains("can not search") ||
+            folded.contains("live search is unavailable") ||
+            folded.contains("don't have access") ||
+            folded.contains("do not have access") ||
+            folded.contains("غير متاح") ||
+            folded.contains("لا أستطيع البحث") ||
+            folded.contains("ما اقدر ابحث")
     }
 
     private fun bearerPresent(): Boolean {
@@ -202,6 +462,7 @@ class GroqBrain(
                 }
                 GroqChatResult.NotConfigured -> return BrainResult.Failure(id, BrainError.NotConfigured)
                 GroqChatResult.Unavailable -> return BrainResult.Failure(id, BrainError.Unavailable)
+                is GroqChatResult.SearchDenied -> return BrainResult.Failure(id, BrainError.Unavailable)
             }
         }
         if (limited || !rotation.hasAvailableModel()) {
@@ -255,7 +516,7 @@ class GroqBrain(
             when (result) {
                 is GroqChatResult.Limited -> return Turn.Limited(result.retryAfter, result.daily)
                 GroqChatResult.NotConfigured -> return Turn.NotConfigured
-                GroqChatResult.Unavailable -> return Turn.Unavailable
+                GroqChatResult.Unavailable, is GroqChatResult.SearchDenied -> return Turn.Unavailable
                 is GroqChatResult.Ok -> {
                     spent += result.totalTokens ?: 0
                     val calls = result.message.toolCalls
@@ -346,5 +607,16 @@ class GroqBrain(
         private const val SUMMARY_SYSTEM =
             "Summarize the conversation memory in a few short sentences. " +
                 "Reply with the summary only. Do not call tools."
+        private const val BROWSER_SYSTEM =
+            "You are Jarvis, a spoken assistant on a phone in Saudi Arabia. " +
+                "Search the web for this question. Answer in one or two short sentences " +
+                "in the user's language. Name the source and the date. " +
+                "No URLs, no markdown, and no citation markers."
+        private const val PHRASE_SYSTEM =
+            "You are Jarvis, a spoken assistant. Answer in one or two short sentences " +
+                "in the user's language. Use only the search results in the user message. " +
+                "Do not use prior knowledge. Name the source and the date. " +
+                "Do not include URLs or markdown. If the results do not contain the answer, say so."
+        private val URLS = Regex("""https?://[^\s<>\]]+""")
     }
 }

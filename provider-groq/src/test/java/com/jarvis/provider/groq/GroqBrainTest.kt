@@ -119,14 +119,86 @@ class GroqBrainTest {
     }
 
     @Test
-    fun freshQuestionSaysSearchIsUnavailableWithoutCallingGroq() = runBlocking {
-        assertFalse(GroqModels.COMPOUND_SEARCH)
+    fun freshQuestionUsesBrowserSearchBeforeTheWorker() = runBlocking {
+        transport.handler = { request ->
+            assertTrue(request.browserSearch)
+            assertEquals(GroqModels.BROWSER_SEARCH[0], request.model)
+            assertTrue(request.tools.isEmpty())
+            GroqChatResult.Ok(
+                AssistantMessage("Al Hilal won yesterday, from Reuters on 24 October 2026.", emptyList()),
+                totalTokens = 40,
+            )
+        }
+        val result = brain.reply(BrainRequest("who won the last Al Hilal match")) as BrainResult.Answer
+        assertTrue(result.text.contains("Reuters"))
+        assertTrue(result.text.contains("24 October 2026"))
+        assertEquals(1, transport.chats.size)
+        assertTrue(transport.searches.isEmpty())
+        assertTrue(logs.any { it.contains("path=browser") })
+    }
+
+    @Test
+    fun browserQuotaFallsThroughToSearchResults() = runBlocking {
+        transport.handler = { request ->
+            if (request.browserSearch) {
+                GroqChatResult.SearchDenied("quota", localCap = true)
+            } else {
+                assertTrue(request.messages.any { it.content.orEmpty().contains("Reuters") })
+                assertTrue(request.tools.isEmpty())
+                GroqChatResult.Ok(
+                    AssistantMessage("Al Hilal won, from Reuters on 23 October 2026.", emptyList()),
+                    totalTokens = 18,
+                )
+            }
+        }
+        transport.searchHandler = {
+            LiveSearchResult.Ok(
+                listOf(
+                    LiveHit(
+                        title = "Al Hilal beat Al Nassr",
+                        source = "Reuters",
+                        date = "23 Oct 2026",
+                        link = "https://www.reuters.com/hilal",
+                        kind = "news",
+                    ),
+                ),
+            )
+        }
+        val result = brain.reply(BrainRequest("who won the last Al Hilal match")) as BrainResult.Answer
+        assertEquals("Al Hilal won, from Reuters on 23 October 2026.", result.text)
+        assertEquals(listOf("who won the last Al Hilal match"), transport.searches)
+        assertEquals("https://www.reuters.com/hilal", result.search?.sources?.single()?.uri)
+        assertTrue(logs.any { it.contains("browser_search skipped") && it.contains("reason=quota") })
+        assertTrue(logs.any { it.contains("path=search") })
+    }
+
+    @Test
+    fun searchResultsAreSpokenWhenGroqWillNotPhraseThem() = runBlocking {
+        transport.handler = { request ->
+            if (request.browserSearch) GroqChatResult.SearchDenied("plan") else GroqChatResult.Unavailable
+        }
+        transport.searchHandler = {
+            LiveSearchResult.Ok(
+                listOf(
+                    LiveHit("Cabinet meets in Riyadh", "Arab News", "24 Oct 2026", "https://www.arabnews.com/a"),
+                ),
+            )
+        }
+        val result = brain.reply(BrainRequest("latest news about Saudi Arabia")) as BrainResult.Answer
+        assertEquals("From Arab News on 24 Oct 2026: Cabinet meets in Riyadh.", result.text)
+        assertTrue(logs.any { it.contains("path=search-direct") })
+    }
+
+    @Test
+    fun everyLivePathFailingSaysSearchIsUnavailable() = runBlocking {
+        transport.handler = { GroqChatResult.SearchDenied("permission") }
+        transport.searchHandler = { LiveSearchResult.Unavailable }
         val english = brain.reply(BrainRequest("what's the latest news about Saudi Arabia")) as BrainResult.Answer
         val arabic = brain.reply(BrainRequest("ما آخر أخبار السعودية")) as BrainResult.Answer
         assertEquals(GroqBrain.UNAVAILABLE_EN, english.text)
         assertEquals(GroqBrain.UNAVAILABLE_AR, arabic.text)
-        assertTrue(transport.chats.isEmpty())
-        assertTrue(logs.any { it.contains("live search unavailable") })
+        assertEquals(2, transport.searches.size)
+        assertTrue(logs.any { it.contains("live search unavailable reason=all-paths-failed") })
     }
 
     @Test
@@ -252,10 +324,16 @@ class GroqBrainTest {
 
 class ScriptedTransport : GroqTransport {
     val chats = mutableListOf<GroqChatRequest>()
+    val searches = mutableListOf<String>()
     var handler: (GroqChatRequest) -> GroqChatResult = { GroqChatResult.Unavailable }
+    var searchHandler: (String) -> LiveSearchResult = { LiveSearchResult.Unavailable }
     override suspend fun complete(request: GroqChatRequest): GroqChatResult {
         chats += request
         return handler(request)
     }
     override suspend fun transcribe(wav: ByteArray): GroqTranscript = GroqTranscript.Failed
+    override suspend fun search(query: String): LiveSearchResult {
+        searches += query
+        return searchHandler(query)
+    }
 }
