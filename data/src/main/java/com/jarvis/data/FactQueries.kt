@@ -16,14 +16,31 @@ object FactMatch {
 
     fun matching(facts: List<Fact>, query: String): List<Fact> {
         if (isAll(query)) return facts
-        val needle = fold(query)
-        if (needle.isEmpty()) return facts
+        // Remember stores "the e2e token is pinecone" under the key "e2e token".
+        // Recall and forget still say "the e2e token", so drop those articles first.
+        val needle = stripArticles(fold(query))
+        if (needle.isEmpty()) return emptyList()
         return facts.filter { fact ->
             fold(fact.key).contains(needle) || fold(fact.value).contains(needle)
         }
     }
 
     private fun fold(raw: String): String = raw.trim().lowercase()
+
+    private fun stripArticles(raw: String): String {
+        var text = raw.trim()
+        var changed = true
+        while (changed) {
+            changed = false
+            for (prefix in ARTICLES) {
+                if (text.startsWith(prefix)) {
+                    text = text.removePrefix(prefix).trim()
+                    changed = true
+                }
+            }
+        }
+        return text
+    }
 
     private val ALL = setOf(
         "",
@@ -38,5 +55,15 @@ object FactMatch {
         "كلشي",
         "كل شي",
         "اي شيء",
+    )
+
+    private val ARTICLES = listOf(
+        "that ",
+        "this ",
+        "my ",
+        "the ",
+        "ان ",
+        "اني ",
+        "انني ",
     )
 }

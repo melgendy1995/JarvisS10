@@ -58,7 +58,10 @@ class MemoryPolicyTest {
             fact(id = 2, key = "city", value = "Riyadh", pinned = false, createdAt = 2),
         )
         assertEquals(listOf("tea"), FactMatch.matching(facts, "mint").map { it.key })
+        assertEquals(listOf("tea"), FactMatch.matching(facts, "the tea").map { it.key })
+        assertEquals(listOf("tea"), FactMatch.matching(facts, "my tea").map { it.key })
         assertEquals(2, FactMatch.matching(facts, "me").size)
+        assertTrue(FactMatch.matching(facts, "the").isEmpty())
         assertTrue(FactMatch.isAll("everything"))
         assertFalse(FactMatch.isAll("tea"))
     }
