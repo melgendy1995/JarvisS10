@@ -136,6 +136,8 @@ class YouTubeUiTest {
             right = 2500,
             bottom = 1240,
         )
+        val playAll = row(desc = "Play all", top = 700, bottom = 820, left = 400, right = 800)
+        assertEquals(playAll, YouTubeUi.playAll(listOf(playAll, playlist)))
         assertEquals(playlist, YouTubeUi.firstMix(listOf(playlist), 3040, 1440))
         assertNull(YouTubeUi.firstVideo(listOf(playlist), 3040, 1440))
         assertNull(YouTubeUi.skipButton(listOf(miniSkip)))

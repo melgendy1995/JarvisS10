@@ -68,6 +68,15 @@ object YouTubeUi {
         }
     }
 
+    /** Playlist page button. Tapping the row only opens the playlist. */
+    fun playAll(nodes: List<UiNode>): UiNode? {
+        return nodes.firstOrNull { node ->
+            if (!node.clickable) return@firstOrNull false
+            val blob = fold(normalize("${node.text} ${node.desc}"))
+            blob == "play all" || blob.startsWith("play all ") || blob == "تشغيل الكل" || blob.startsWith("تشغيل الكل ")
+        }
+    }
+
     fun skipButton(nodes: List<UiNode>): UiNode? {
         return nodes.firstOrNull { node ->
             node.clickable &&

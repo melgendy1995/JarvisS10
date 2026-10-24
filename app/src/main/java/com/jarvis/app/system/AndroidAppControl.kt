@@ -203,6 +203,12 @@ class AndroidAppControl(context: Context) : AppControl {
             val nodes = service.snapshot()
             val width = service.screenWidth()
             if (startedOnWatchPage(service, nodes, width)) return true
+            val playAll = YouTubeUi.playAll(nodes)
+            if (playAll != null && !YouTubeUi.isFullPlayer(nodes, width)) {
+                service.tap(playAll)
+                delay(800)
+                continue
+            }
             val skip = YouTubeUi.skipButton(nodes)
             if (skip != null) {
                 service.tap(skip)
