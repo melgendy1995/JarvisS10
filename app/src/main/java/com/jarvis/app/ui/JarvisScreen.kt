@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.view.WindowManager
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -114,6 +115,9 @@ fun JarvisScreen(viewModel: JarvisViewModel) {
     }
 
     val overlay = ui.personaOpen || ui.groqSettings
+    BackHandler(enabled = overlay) {
+        if (ui.personaOpen) viewModel.closePersona() else viewModel.closeGroqSettings()
+    }
     val streaming by CameraRuntime.streaming.collectAsStateWithLifecycle()
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (!overlay) {

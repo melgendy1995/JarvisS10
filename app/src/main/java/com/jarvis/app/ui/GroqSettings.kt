@@ -7,6 +7,9 @@ import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -59,9 +62,23 @@ fun GroqSettings(
             .imePadding()
             .navigationBarsPadding()
             .windowInsetsPadding(WindowInsets.displayCutout)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 28.dp, vertical = 28.dp),
+            .padding(horizontal = 28.dp, vertical = 16.dp),
     ) {
+        Text(
+            text = "CLOSE",
+            color = Faint,
+            fontSize = 14.sp,
+            letterSpacing = 3.sp,
+            modifier = Modifier
+                .heightIn(min = 48.dp)
+                .semantics { contentDescription = "Close" }
+                .clickable(onClick = onClose),
+        )
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState()),
+        ) {
         Text(
             text = "GROQ",
             color = Groq.copy(alpha = 0.9f),
@@ -173,13 +190,7 @@ fun GroqSettings(
             modifier = Modifier.clickable { onSaveCamera(cameraPassword, portText) },
         )
         Spacer(Modifier.height(16.dp))
-        Text(
-            text = "CLOSE",
-            color = Faint,
-            fontSize = 14.sp,
-            letterSpacing = 3.sp,
-            modifier = Modifier.clickable(onClick = onClose),
-        )
+        }
     }
 }
 

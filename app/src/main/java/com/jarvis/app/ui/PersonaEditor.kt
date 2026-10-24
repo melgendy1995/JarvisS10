@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -47,9 +49,13 @@ fun PersonaEditor(
             .background(Color.Black)
             .imePadding()
             .navigationBarsPadding()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 28.dp, vertical = 48.dp),
+            .padding(horizontal = 28.dp, vertical = 20.dp),
     ) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState()),
+        ) {
         Text(
             text = "ABOUT ${title.uppercase()}",
             color = Phone.copy(alpha = 0.9f),
@@ -72,8 +78,8 @@ fun PersonaEditor(
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 180.dp),
-            minLines = 6,
+                .heightIn(min = 96.dp, max = 220.dp),
+            minLines = 3,
             label = { Text("Persona") },
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = Mist,
@@ -94,21 +100,26 @@ fun PersonaEditor(
             fontSize = 12.sp,
             fontWeight = FontWeight.Light,
         )
-        Spacer(Modifier.height(20.dp))
+        }
+        Spacer(Modifier.height(12.dp))
         Text(
             text = "SAVE",
             color = Phone.copy(alpha = 0.9f),
             fontSize = 14.sp,
             letterSpacing = 3.sp,
-            modifier = Modifier.clickable { onSave(text) },
+            modifier = Modifier
+                .heightIn(min = 48.dp)
+                .clickable { onSave(text) },
         )
-        Spacer(Modifier.height(16.dp))
         Text(
             text = "CLOSE",
             color = Faint,
             fontSize = 14.sp,
             letterSpacing = 3.sp,
-            modifier = Modifier.clickable(onClick = onClose),
+            modifier = Modifier
+                .heightIn(min = 48.dp)
+                .semantics { contentDescription = "Close" }
+                .clickable(onClick = onClose),
         )
     }
 }
