@@ -118,6 +118,30 @@ class YouTubeUiTest {
     }
 
     @Test
+    fun aPlaylistRowIsPlayableAndAMiniPlayerSkipIsNot() {
+        val playlist = row(
+            desc = "Playlist - Lofi Girl - Halloween 2026 - Lofi Girl - 14 videos",
+            top = 928,
+            bottom = 1272,
+            left = 195,
+            right = 2733,
+        )
+        val miniSkip = UiNode(
+            text = "Skip",
+            desc = "Skip ad",
+            viewId = "com.google.android.youtube:id/modern_miniplayer_skip_ad_button",
+            clickable = true,
+            left = 2200,
+            top = 1104,
+            right = 2500,
+            bottom = 1240,
+        )
+        assertEquals(playlist, YouTubeUi.firstMix(listOf(playlist), 3040, 1440))
+        assertNull(YouTubeUi.firstVideo(listOf(playlist), 3040, 1440))
+        assertNull(YouTubeUi.skipButton(listOf(miniSkip)))
+    }
+
+    @Test
     fun landscapePlayerBesideTheQueueCountsAsTheWatchPage() {
         val player = UiNode(
             text = "",

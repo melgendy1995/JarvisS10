@@ -161,14 +161,23 @@ class AndroidAppControl(context: Context) : AppControl {
                 if (startedOnWatchPage(service, service.snapshot(), width)) return true
                 return awaitPlayback(service)
             }
-            mix = YouTubeUi.firstMix(nodes, width, height) ?: mix
+            val visibleMix = YouTubeUi.firstMix(nodes, width, height)
+            if (visibleMix != null) {
+                // A playlist row is the result. Another scroll pushes it under the nav bar.
+                service.tap(visibleMix)
+                tapped = true
+                delay(1_200)
+                if (startedOnWatchPage(service, service.snapshot(), width)) return true
+                return awaitPlayback(service)
+            }
+            mix = visibleMix ?: mix
             if (attempt == 0) logRows(nodes)
             // The search field appears before the rows. Scrolling then jumps past the first videos.
             if (!YouTubeUi.hasLoadedRows(nodes)) {
                 delay(400)
                 continue
             }
-            if (scrolls >= 2 || !service.scrollResults()) break
+            if (scrolls >= 3 || !service.scrollResults()) break
             scrolls++
             delay(700)
         }

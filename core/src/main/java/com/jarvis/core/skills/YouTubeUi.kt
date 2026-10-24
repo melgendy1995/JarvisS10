@@ -70,7 +70,9 @@ object YouTubeUi {
 
     fun skipButton(nodes: List<UiNode>): UiNode? {
         return nodes.firstOrNull { node ->
-            node.clickable && isSkipAd(node.text, node.desc, node.viewId)
+            node.clickable &&
+                !node.viewId.contains("miniplayer", ignoreCase = true) &&
+                isSkipAd(node.text, node.desc, node.viewId)
         }
     }
 
@@ -210,7 +212,11 @@ object YouTubeUi {
     }
 
     private fun isMix(blob: String): Boolean {
-        return blob.startsWith("mix ") || blob.startsWith("mix -") || blob.contains(" curated by youtube")
+        return blob.startsWith("mix ") ||
+            blob.startsWith("mix -") ||
+            blob.startsWith("playlist ") ||
+            blob.startsWith("playlist -") ||
+            blob.contains(" curated by youtube")
     }
 
     private fun hasDuration(blob: String): Boolean = DURATION.containsMatchIn(blob)
