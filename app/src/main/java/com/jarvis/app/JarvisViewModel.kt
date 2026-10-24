@@ -21,6 +21,7 @@ import com.jarvis.audio.wake.WakeChime
 import com.jarvis.audio.wake.WakeConfig
 import com.jarvis.audio.wake.WakeHit
 import com.jarvis.audio.wake.WakePhrases
+import com.jarvis.audio.wake.WakeSession
 import com.jarvis.core.brain.BrainRequest
 import com.jarvis.core.brain.BrainResult
 import com.jarvis.core.brain.ConversationTurn
@@ -144,8 +145,23 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private var listenId = 0
     private var settledListen = -1
     private var askedMic = false
+    private val wake = WakeRuntime.session
 
     @Volatile private var liveActive = false
+
+    private fun resumeWakePassive(reason: String) {
+        if (holding) return
+        val was = wake.phase
+        wake.enter(WakeSession.Phase.PASSIVE)
+        handsFree = false
+        recognizerBusy = false
+        WakeRuntime.resume(speaking = false)
+        WakeLog.state("PASSIVE")
+        if (reason != "visible" || was != WakeSession.Phase.PASSIVE) {
+            WakeLog.i("resume $reason")
+        }
+        ListenForegroundService.note(getApplication(), "Listening for Hey Jarvis")
+    }
 
     private val callbacks = PushToTalkRecognizer.Callbacks(
         onLevel = { level ->
@@ -162,6 +178,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             // Soft errors while the finger is down are restarted inside the recognizer
             // and never reach here. Anything that does is a failed on-device transcript.
             holding = false
+            if (message.contains("busy", ignoreCase = true)) wake.recognizerBusy() else wake.error()
             sttFailure = message
             freezeUtterancePcm()
             if (!routed) routeHeard(hardFailure = hard)
@@ -241,6 +258,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         holding = true
         handsFree = false
         recognizerBusy = false
+        wake.holdStart()
         bargeStop = false
         bargeSession++
         listenId++
@@ -274,7 +292,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             withContext(Dispatchers.IO) { WakeRuntime.pauseBlocking() }
             if (!holding || gen != generation) {
-                if (!holding && gen == generation && !recognizerBusy) WakeRuntime.resume(speaking = false)
+                if (!holding && gen == generation) resumeWakePassive("hold cancelled")
                 return@launch
             }
             recognizer.start(callbacks)
@@ -285,6 +303,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         if (!holding) return
         val gen = generation
         holding = false
+        wake.holdRelease()
         pushLevel(0f)
         _ui.update { it.copy(holding = false) }
         freezeUtterancePcm()
@@ -295,7 +314,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             waitForResult = viewModelScope.launch {
                 delay(3_500)
                 if (gen != generation || holding || routed) return@launch
-                if (_ui.value.orb == OrbState.LISTENING) {
+                wake.emptyTranscript()
+                resumeWakePassive("hold timeout")
+                if (_ui.value.orb == OrbState.LISTENING || _ui.value.orb == OrbState.IDLE) {
                     showIdle("I didn't hear anything.")
                 }
             }
@@ -313,6 +334,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
         viewModelScope.launch {
             ListenForegroundService.startWhileVisible(getApplication())
+            wake.appVisible()
+            if (!holding && wake.shouldCapture) resumeWakePassive("visible")
         }
     }
 
@@ -402,6 +425,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             }
             viewModelScope.launch {
                 ListenForegroundService.startWhileVisible(getApplication())
+                wake.appVisible()
+                if (!holding && wake.shouldCapture) resumeWakePassive("permission")
             }
         }
     }
@@ -427,6 +452,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             }
             routed = true
             waitForResult?.cancel()
+            wake.emptyTranscript()
             if (hardFailure && sttFailure.isNotBlank()) {
                 showProblem(sttFailure)
             } else {
@@ -435,6 +461,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         routed = true
+        wake.commandHeard()
         pendingPcm = ByteArray(0)
         waitForResult?.cancel()
         deliver(text)
@@ -462,9 +489,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             }
             if (!isActive || gen != generation) return@launch
             if (text.isEmpty()) {
+                wake.emptyTranscript()
                 showIdle(sttFailure.ifBlank { "I didn't hear anything." })
                 return@launch
             }
+            wake.commandHeard()
             deliver(text)
         }
     }
@@ -557,6 +586,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                             _ui.update {
                                 it.copy(orb = OrbState.SPEAKING, reply = result.text, level = 0f)
                             }
+                            wake.speak()
                             WakeRuntime.resume(speaking = true)
                             try {
                                 playPcm(pcm)
@@ -572,6 +602,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                         val follow = result.followUp
                         if (follow != null && gen == generation && !holding) {
                             didLiveFollow = true
+                            wake.listen()
                             runFollowUp(follow)
                         } else {
                             follow?.close()
@@ -741,6 +772,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
         mic?.muted = true
         pushLevel(0f)
+        wake.speak()
         WakeLog.state("SPEAKING")
         ListenForegroundService.note(getApplication(), "Speaking")
         val token = ++bargeSession
@@ -778,11 +810,10 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     if (_ui.value.orb == OrbState.SPEAKING) {
                         _ui.update { it.copy(orb = OrbState.IDLE, level = 0f) }
                     }
-                    WakeRuntime.resume(speaking = false)
-                    if (!handsFree) {
-                        WakeLog.state("PASSIVE")
-                        ListenForegroundService.note(getApplication(), "Listening for Hey Jarvis")
-                    }
+                    wake.ttsDone(followUp = false)
+                    resumeWakePassive("tts done")
+                } else if (!holding && !resumeMic && !bargeStop && handsFree) {
+                    wake.ttsDone(followUp = true)
                 }
             }
         }
@@ -815,7 +846,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         routed = false
         sttFailure = ""
         pendingPcm = ByteArray(0)
-        WakeLog.state("RECOGNIZING")
+        wake.listen()
+        WakeLog.state("LISTENING")
         ListenForegroundService.note(getApplication(), "Listening")
         pushLevel(0f)
         _ui.update {
@@ -831,7 +863,10 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             withContext(Dispatchers.IO) { WakeRuntime.pauseBlocking() }
             if (gen != generation || holding) {
-                if (gen == generation) recognizerBusy = false
+                if (gen == generation) {
+                    recognizerBusy = false
+                    if (!holding) resumeWakePassive("listen cancelled")
+                }
                 return@launch
             }
             duck.acquireIfPlaying()
@@ -843,7 +878,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun startFollowUp(gen: Int) {
         if (gen != generation || holding || !handsFree) return
-        WakeLog.state("FOLLOW_UP")
+        wake.listen()
+        WakeLog.state("LISTENING")
         ListenForegroundService.note(getApplication(), "Listening")
         pushLevel(0f)
         _ui.update { it.copy(orb = OrbState.LISTENING, level = 0f, you = "") }
@@ -909,6 +945,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         if (line.isEmpty() || WakePhrases.isStop(line)) {
             if (!followUp && line.isEmpty()) WakeLog.falseTrigger()
             val quiet = followUp || WakePhrases.isStop(line)
+            if (followUp) wake.followUpEnded() else wake.emptyTranscript()
             val message = when {
                 quiet -> ""
                 hard && sttFailure.isNotBlank() -> sttFailure
@@ -917,6 +954,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             endHandsFree(quiet = quiet, message = message)
             return
         }
+        wake.commandHeard()
         WakeLog.state("THINKING")
         pushLevel(0f)
         _ui.update {
@@ -934,13 +972,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun endHandsFree(quiet: Boolean, message: String = "") {
         if (holding) return
-        handsFree = false
-        recognizerBusy = false
         bargeStop = false
         duck.release()
-        WakeRuntime.resume(speaking = false)
-        WakeLog.state("PASSIVE")
-        ListenForegroundService.note(getApplication(), "Listening for Hey Jarvis")
+        resumeWakePassive("hands-free end")
         if (!quiet && message.isNotBlank()) {
             showIdle(message)
             return
@@ -962,6 +996,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 onFallbackCapture = {
                     if (token != bargeSession || holding) return@Callbacks
                     WakeLog.i("barge recognizer unavailable, model gate ${WakeConfig.TTS_THRESHOLD}")
+                    wake.speak()
                     WakeRuntime.resume(speaking = true)
                 },
             ),
@@ -988,6 +1023,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 bargeStop = true
                 bargeSession++
                 listenId++
+                wake.bargeStop()
                 speaker.stop()
                 recognizer.discard()
             }
@@ -1004,6 +1040,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 utteranceJob?.cancel()
                 if (!rest.isNullOrBlank()) {
                     recognizerBusy = false
+                    wake.commandHeard()
                     WakeLog.state("THINKING")
                     pushLevel(0f)
                     _ui.update {
@@ -1026,7 +1063,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun showProblem(message: String) {
         routed = true
-        if (!holding && !recognizerBusy && !handsFree) WakeRuntime.resume(speaking = false)
+        if (!holding) resumeWakePassive("error")
         pushLevel(0f)
         _ui.update {
             it.copy(
@@ -1052,7 +1089,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun showIdle(message: String) {
         routed = true
-        if (!holding && !recognizerBusy && !handsFree) WakeRuntime.resume(speaking = false)
+        if (!holding) resumeWakePassive("idle")
         pushLevel(0f)
         _ui.update {
             it.copy(
@@ -1160,6 +1197,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         duck.release()
         recognizer.release()
         speaker.shutdown()
+        holding = false
+        resumeWakePassive("cleared")
         super.onCleared()
     }
 

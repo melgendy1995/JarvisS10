@@ -4,11 +4,13 @@ import android.util.Log
 import com.jarvis.audio.wake.WakeConfig
 import com.jarvis.audio.wake.WakeHit
 import com.jarvis.audio.wake.WakeListener
+import com.jarvis.audio.wake.WakeSession
 import java.util.Locale
 import kotlinx.coroutines.flow.MutableSharedFlow
 
 /** Process-wide handle so the foreground service and the voice loop share one microphone. */
 object WakeRuntime {
+    val session = WakeSession()
     val triggers = MutableSharedFlow<WakeHit>(extraBufferCapacity = 8)
 
     @Volatile
@@ -20,6 +22,11 @@ object WakeRuntime {
 
     fun resume(speaking: Boolean) {
         listener?.resume(speaking)
+    }
+
+    fun resumePassive() {
+        session.enter(WakeSession.Phase.PASSIVE)
+        listener?.resume(speaking = false)
     }
 }
 
@@ -51,7 +58,11 @@ object WakeLog {
         Log.i(TAG, message)
     }
 
-    fun score(value: Float) {
-        Log.i(TAG, "score hey_jarvis=${String.format(Locale.US, "%.3f", value)} state=$state")
+    fun score(value: Float, threshold: Float = WakeConfig.THRESHOLD) {
+        Log.i(
+            TAG,
+            "score hey_jarvis=${String.format(Locale.US, "%.3f", value)} " +
+                "threshold=${String.format(Locale.US, "%.3f", threshold)} state=$state",
+        )
     }
 }

@@ -22,6 +22,7 @@ data class WakeHit(val score: Float, val duringSpeech: Boolean)
  */
 class WakeListener(
     context: Context,
+    private val session: WakeSession = WakeSession(),
     private val onHit: (WakeHit) -> Unit,
 ) {
     data class WavScore(val max: Float, val triggered: Boolean, val samples: Int)
@@ -29,7 +30,7 @@ class WakeListener(
     private val app = context.applicationContext
     private val running = AtomicBoolean(false)
     private val monitor = Object()
-    private val session = Object()
+    private val sessionLock = Object()
     private var thread: Thread? = null
     private var nets: OnnxWakeNets? = null
     private var pipeline: WakePipeline? = null
@@ -39,11 +40,19 @@ class WakeListener(
     @Volatile private var micHeld = false
     private val pauseEpoch = AtomicInteger(0)
     private val parkedEpoch = AtomicInteger(0)
+    private val restartEpoch = AtomicInteger(0)
+    private val watchdogHold = AtomicInteger(0)
+    @Volatile private var lastFrameAt = 0L
+    @Volatile private var lastWatchdogAt = 0L
     @Volatile private var failed = false
     private var hot = 0
 
+    val lastFrameAtElapsedRealtime: Long
+        get() = lastFrameAt
+
     fun start() {
         if (!running.compareAndSet(false, true)) return
+        lastFrameAt = SystemClock.elapsedRealtime()
         val worker = Thread({ runLoop() }, "jarvis-wake")
         thread = worker
         worker.start()
@@ -62,21 +71,32 @@ class WakeListener(
         else Log.i(WakeConfig.LOG_TAG, "mic closed")
     }
 
-    fun resume(speakingNow: Boolean) {
-        speaking = speakingNow
+    fun resume(speaking: Boolean) {
+        this.speaking = speaking
         owner = Owner.WAKE
+        lastFrameAt = SystemClock.elapsedRealtime()
+        synchronized(monitor) { monitor.notifyAll() }
+    }
+
+    fun restartCapture() {
+        restartEpoch.incrementAndGet()
+        if (session.shouldCapture && owner != Owner.WAKE) {
+            speaking = false
+            owner = Owner.WAKE
+        }
         synchronized(monitor) { monitor.notifyAll() }
     }
 
     fun scoreWav(samples: ShortArray): WavScore {
         val restore = owner == Owner.WAKE
         val wasSpeaking = speaking
+        watchdogHold.incrementAndGet()
         pauseBlocking()
         try {
             val model = nets ?: return WavScore(0f, false, samples.size).also {
                 Log.w(WakeConfig.LOG_TAG, "debug wav skipped, models are not loaded")
             }
-            val pipe = synchronized(session) { WakePipeline(model, prime = true) }
+            val pipe = synchronized(sessionLock) { WakePipeline(model, prime = true) }
             val gate = WakeScorer()
             val padded = ShortArray(WakeConfig.SAMPLE_RATE + samples.size + WakeConfig.SAMPLE_RATE)
             samples.copyInto(padded, WakeConfig.SAMPLE_RATE)
@@ -86,17 +106,18 @@ class WakeListener(
             while (offset + WakeConfig.FRAME_SAMPLES <= padded.size) {
                 val frame = padded.copyOfRange(offset, offset + WakeConfig.FRAME_SAMPLES)
                 offset += WakeConfig.FRAME_SAMPLES
-                val raw = synchronized(session) { pipe.accept(frame) } ?: continue
+                val raw = synchronized(sessionLock) { pipe.accept(frame) } ?: continue
                 if (raw > max) max = raw
                 val accepted = gate.accept(raw, WakeConfig.THRESHOLD)
-                if (accepted >= WakeConfig.THRESHOLD) triggered = true
+                if (accepted > 0f) triggered = true
             }
             Log.i(
                 WakeConfig.LOG_TAG,
-                "debug wav samples=${samples.size} max=${fmt(max)} triggered=$triggered",
+                "debug wav samples=${samples.size} max=${fmt(max)} triggered=$triggered threshold=${fmt(WakeConfig.THRESHOLD)}",
             )
             return WavScore(max, triggered, samples.size)
         } finally {
+            watchdogHold.decrementAndGet()
             if (restore) resume(wasSpeaking)
         }
     }
@@ -107,7 +128,7 @@ class WakeListener(
         synchronized(monitor) { monitor.notifyAll() }
         thread?.join(800)
         thread = null
-        synchronized(session) {
+        synchronized(sessionLock) {
             nets?.close()
             nets = null
             pipeline = null
@@ -124,21 +145,36 @@ class WakeListener(
             return
         }
         val model = loaded.getOrThrow()
-        synchronized(session) {
+        synchronized(sessionLock) {
             nets = model
             pipeline = WakePipeline(model, prime = true)
         }
         Log.i(WakeConfig.LOG_TAG, "pipeline ready plainJarvis=${WakeConfig.PLAIN_JARVIS_MODEL}")
         owner = Owner.WAKE
+        lastFrameAt = SystemClock.elapsedRealtime()
         var record: AudioRecord? = null
         var echo: AcousticEchoCanceler? = null
         var noise: NoiseSuppressor? = null
         val pending = ShortArray(WakeConfig.FRAME_SAMPLES)
         var filled = 0
         var frames = 0L
+        var framesSinceOpen = 0L
+        var seenRestart = restartEpoch.get()
         var flushOnResume = false
         try {
             while (running.get()) {
+                val now = SystemClock.elapsedRealtime()
+                val kick = restartEpoch.get()
+                if (maybeWatchdog(now) || kick != seenRestart) {
+                    seenRestart = restartEpoch.get()
+                    filled = 0
+                    flushOnResume = true
+                    release(record, echo, noise)
+                    record = null
+                    echo = null
+                    noise = null
+                    micHeld = false
+                }
                 if (owner != Owner.WAKE) {
                     filled = 0
                     flushOnResume = true
@@ -150,6 +186,8 @@ class WakeListener(
                     synchronized(monitor) {
                         while (running.get() && owner != Owner.WAKE) {
                             parkedEpoch.set(pauseEpoch.get())
+                            maybeWatchdog(SystemClock.elapsedRealtime())
+                            if (owner == Owner.WAKE) break
                             monitor.wait(400)
                         }
                     }
@@ -165,6 +203,8 @@ class WakeListener(
                         continue
                     }
                     micHeld = true
+                    framesSinceOpen = 0
+                    lastFrameAt = SystemClock.elapsedRealtime()
                     Log.i(
                         WakeConfig.LOG_TAG,
                         "mic open source=${opened?.source} aec=${echo?.enabled == true} ns=${noise?.enabled == true} speaking=$speaking",
@@ -177,7 +217,16 @@ class WakeListener(
                 val current = record ?: continue
                 val chunk = ShortArray(WakeConfig.FRAME_SAMPLES - filled)
                 val read = current.read(chunk, 0, chunk.size, AudioRecord.READ_BLOCKING)
-                if (read <= 0) continue
+                if (read < 0) {
+                    Log.w(WakeConfig.LOG_TAG, "mic read error $read")
+                    release(record, echo, noise)
+                    record = null
+                    echo = null
+                    noise = null
+                    micHeld = false
+                    continue
+                }
+                if (read == 0) continue
                 chunk.copyInto(pending, filled, 0, read)
                 filled += read
                 if (filled < WakeConfig.FRAME_SAMPLES) continue
@@ -185,8 +234,10 @@ class WakeListener(
                 filled = 0
                 if (owner != Owner.WAKE) continue
                 val started = SystemClock.elapsedRealtime()
-                val raw = synchronized(session) { pipeline?.accept(frame) } ?: continue
+                val raw = synchronized(sessionLock) { pipeline?.accept(frame) } ?: continue
                 frames++
+                framesSinceOpen++
+                lastFrameAt = SystemClock.elapsedRealtime()
                 val state = if (speaking) "SPEAKING" else "PASSIVE"
                 val gate = if (speaking) WakeConfig.TTS_THRESHOLD else WakeConfig.THRESHOLD
                 val judged = if (speaking) {
@@ -196,15 +247,18 @@ class WakeListener(
                     hot = 0
                     raw
                 }
-                val accepted = scorer.accept(judged, gate)
+                val accepted = scorer.accept(judged, gate, allowSoft = !speaking)
                 if (raw >= WakeConfig.LOG_SCORE) {
-                    Log.i(WakeConfig.LOG_TAG, "score hey_jarvis=${fmt(raw)} state=$state")
+                    Log.i(
+                        WakeConfig.LOG_TAG,
+                        "score hey_jarvis=${fmt(raw)} threshold=${fmt(gate)} state=$state",
+                    )
                 }
-                if (accepted >= gate) {
-                    Log.i(WakeConfig.LOG_TAG, "trigger hey_jarvis=${fmt(accepted)} state=$state")
+                if (accepted > 0f) {
+                    Log.i(WakeConfig.LOG_TAG, "trigger hey_jarvis=${fmt(accepted)} threshold=${fmt(gate)} state=$state")
                     onHit(WakeHit(accepted, speaking))
                 }
-                if (frames % 200L == 0L) {
+                if (framesSinceOpen == 1L || frames % 200L == 0L) {
                     Log.i(WakeConfig.LOG_TAG, "frame ${SystemClock.elapsedRealtime() - started}ms count=$frames state=$state")
                 }
             }
@@ -216,10 +270,21 @@ class WakeListener(
         }
     }
 
+    private fun maybeWatchdog(now: Long): Boolean {
+        if (watchdogHold.get() > 0) return false
+        if (!session.shouldCapture) return false
+        if (!session.watchdogShouldRestart(now, lastFrameAt)) return false
+        if (now - lastWatchdogAt < WakeConfig.WATCHDOG_MS) return false
+        lastWatchdogAt = now
+        Log.i(WakeConfig.LOG_TAG, "wake watchdog restart")
+        restartCapture()
+        return true
+    }
+
     private fun flush() {
         val pipe = pipeline ?: return
         val zeros = ShortArray(WakeConfig.FRAME_SAMPLES)
-        synchronized(session) {
+        synchronized(sessionLock) {
             repeat(WakeConfig.WAKE_FRAMES) { pipe.accept(zeros) }
         }
         scorer.reset()

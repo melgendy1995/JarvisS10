@@ -25,11 +25,15 @@ object WakeConfig {
     const val MIN_MEL_SAMPLES = 400
     const val WARMUP_FRAMES = 5
 
-    const val THRESHOLD = 0.5f
+    const val THRESHOLD = 0.35f
+    const val SOFT_THRESHOLD = 0.30f
+    const val SOFT_WINDOW = 4
+    const val SOFT_HITS = 2
     const val TTS_THRESHOLD = 0.7f
     const val TTS_PATIENCE = 2
     const val LOG_SCORE = 0.2f
-    const val DEBOUNCE_SECONDS = 1.5f
+    const val REFRACTORY_SECONDS = 2f
+    const val WATCHDOG_MS = 3_000L
     const val FOLLOW_UP_MS = 7_000L
 
     const val MEL_ASSET = "wake/melspectrogram.onnx"

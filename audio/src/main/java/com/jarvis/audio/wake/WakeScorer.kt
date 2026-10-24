@@ -1,36 +1,49 @@
 package com.jarvis.audio.wake
 
-import kotlin.math.ceil
-
 /**
- * The openWakeWord predict() gate: the first [warmup] frames are forced to 0,
- * then a detection suppresses later frames inside the debounce window.
+ * Passive wake gate: the first [warmup] frames are forced to 0, then a frame
+ * fires when it is at or above [threshold], or when [softHits] of the last
+ * [softWindow] frames are at or above [softThreshold]. A trigger starts a
+ * refractory window that suppresses later hits.
  */
 class WakeScorer(
     private val warmup: Int = WakeConfig.WARMUP_FRAMES,
 ) {
-    private val history = ArrayDeque<Float>()
+    private val recent = ArrayDeque<Float>()
     private var seen = 0
+    private var time = 0f
+    private var lastTrigger = -Float.MAX_VALUE
 
     fun reset() {
-        history.clear()
+        recent.clear()
         seen = 0
+        time = 0f
+        lastTrigger = -Float.MAX_VALUE
     }
 
     fun accept(
         raw: Float,
-        threshold: Float,
+        threshold: Float = WakeConfig.THRESHOLD,
         frameSeconds: Float = WakeConfig.FRAME_SECONDS,
-        debounceSeconds: Float = WakeConfig.DEBOUNCE_SECONDS,
+        refractorySeconds: Float = WakeConfig.REFRACTORY_SECONDS,
+        allowSoft: Boolean = true,
+        softThreshold: Float = WakeConfig.SOFT_THRESHOLD,
+        softWindow: Int = WakeConfig.SOFT_WINDOW,
+        softHits: Int = WakeConfig.SOFT_HITS,
     ): Float {
         seen++
-        var score = if (seen <= warmup) 0f else raw
-        if (debounceSeconds > 0f && score >= threshold) {
-            val frames = ceil(debounceSeconds / frameSeconds.toDouble()).toInt().coerceAtLeast(1)
-            if (history.takeLast(frames).any { it >= threshold }) score = 0f
+        if (seen <= warmup) {
+            time += frameSeconds
+            return 0f
         }
-        history.addLast(score)
-        while (history.size > 30) history.removeFirst()
-        return score
+        recent.addLast(raw)
+        while (recent.size > softWindow) recent.removeFirst()
+        val hard = raw >= threshold
+        val soft = allowSoft && recent.count { it >= softThreshold } >= softHits
+        val open = time - lastTrigger >= refractorySeconds
+        val triggered = (hard || soft) && open
+        if (triggered) lastTrigger = time
+        time += frameSeconds
+        return if (triggered) raw else 0f
     }
 }

@@ -15,6 +15,7 @@ import androidx.core.content.ContextCompat
 import com.jarvis.app.R
 import com.jarvis.audio.wake.WakeHit
 import com.jarvis.audio.wake.WakeListener
+import com.jarvis.audio.wake.WakeSession
 import com.jarvis.audio.wake.WavPcm
 import java.io.File
 import kotlinx.coroutines.CompletableDeferred
@@ -59,12 +60,13 @@ class ListenForegroundService : Service() {
         running = true
         ready?.complete(Unit)
         if (listener == null && hasMic()) {
-            val created = WakeListener(this) { hit ->
+            val created = WakeListener(this, WakeRuntime.session) { hit ->
                 WakeRuntime.triggers.tryEmit(hit)
             }
             listener = created
             WakeRuntime.listener = created
             created.start()
+            WakeRuntime.session.enter(WakeSession.Phase.PASSIVE)
             WakeLog.state("PASSIVE")
             Log.i(WakeLog.TAG, "microphone foreground service started")
         } else if (!hasMic()) {

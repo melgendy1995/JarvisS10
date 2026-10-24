@@ -24,11 +24,11 @@ The speech-embedding architecture comes from Google's speech_embedding TFHub mod
 
 The audio module sets `androidResources.noCompress` for `onnx`. The debug APK still deflates the three model files (they are read fully into memory) and stores the runtime libraries uncompressed. The app packages `arm64-v8a` only (Galaxy S10). ONNX Runtime 1.31.0 adds `libonnxruntime.so` (34,208,680 bytes) and `libonnxruntime4j_jni.so` (122,576 bytes). The debug APK grew from 37,117,645 bytes to 74,713,072 bytes (about 37.6 MB). That increase is the arm64 runtime plus these three models.
 
-There is no plain "Jarvis" model in the official v0.5.1 assets (`jarvis.onnx` and `jarvis_v0.1.onnx` return 404). `WakeConfig.PLAIN_JARVIS_MODEL` is false. A separate check of the hey_jarvis model on macOS `say -v Daniel` audio scored "hey jarvis" at about 0.995 and the bare word "jarvis" at about 0.022, under the 0.5 threshold. Saying only "Jarvis" does not wake the phone.
+There is no plain "Jarvis" model in the official v0.5.1 assets (`jarvis.onnx` and `jarvis_v0.1.onnx` return 404). `WakeConfig.PLAIN_JARVIS_MODEL` is false. A separate check of the hey_jarvis model on macOS `say -v Daniel` audio scored "hey jarvis" at about 0.995 and the bare word "jarvis" at about 0.022, under the 0.35 threshold. Saying only "Jarvis" does not wake the phone.
 
 ## Pipeline
 
-16 kHz mono int16. Frames are 80 ms (1280 samples). The mel network sees float32 values still in the int16 range. Its output is transformed with `x / 10 + 2`. Embeddings use 76-frame windows stepped by 8. The wake network sees the last 16 embeddings of size 96. The first five scores of a fresh stream are forced to 0, then a hit suppresses another hit for 1.5 s. The passive threshold is 0.5. Scores at or above about 0.2 are logged under `JarvisWake`.
+16 kHz mono int16. Frames are 80 ms (1280 samples). The mel network sees float32 values still in the int16 range. Its output is transformed with `x / 10 + 2`. Embeddings use 76-frame windows stepped by 8. The wake network sees the last 16 embeddings of size 96. The first five scores of a fresh stream are forced to 0. A frame fires when it is at or above 0.35, or when two of the last four frames are at or above 0.30. A hit then suppresses another hit for 2 s. Scores at or above 0.2 are logged under `JarvisWake` with the threshold. If the listener should be passive and no wake frames arrive for 3 s, it restarts capture (`wake watchdog restart`).
 
 Streaming matches openWakeWord: the mel buffer starts as 76 frames of ones, each new 1280 samples are scored with 480 samples of mel context, and the feature buffer is primed with four seconds of low-level noise.
 
@@ -83,7 +83,7 @@ adb -s R3CM501081Z shell am broadcast -a com.jarvis.app.DEBUG_WAKE -p com.jarvis
 
 `run-as` can copy from `/data/local/tmp` on a debuggable build. The receiver scores the file on the in-process listener, so the broadcast still works while YouTube is in front. An absolute path the app can read also works. The broadcast is debug-only. Logcat tag: `JarvisWake`.
 
-The broadcast scores the file on a fresh pipeline (one second of silence on each side, same idea as openWakeWord `predict_clip`) and, when the score crosses 0.5 after warmup and debounce, runs the same orb path as a live wake.
+The broadcast scores the file on a fresh pipeline (one second of silence on each side, same idea as openWakeWord `predict_clip`) and, when the score crosses 0.35 after warmup and refractory (or two of four frames reach 0.30), runs the same orb path as a live wake.
 
 ## Checked on the Galaxy S10
 
