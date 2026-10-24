@@ -29,7 +29,6 @@ import java.util.concurrent.atomic.AtomicInteger
  * One CameraX session. Preview feeds WebRTC. ImageAnalysis feeds JPEG snapshots and MJPEG.
  * Does not open the microphone.
  */
-@OptIn(ExperimentalCamera2Interop::class)
 internal class CameraEngine(
     context: Context,
     private val hub: FrameHub,
@@ -112,6 +111,7 @@ internal class CameraEngine(
         )
     }
 
+    @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
     private fun buildPreview(profile: CameraProfile, rotation: Int): Preview? {
         val provider = surfaceProvider ?: return null
         val builder = Preview.Builder()
@@ -127,6 +127,7 @@ internal class CameraEngine(
         }
     }
 
+    @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
     private fun buildAnalysis(profile: CameraProfile, rotation: Int): ImageAnalysis {
         val builder = ImageAnalysis.Builder()
             .setResolutionSelector(selector(profile))
