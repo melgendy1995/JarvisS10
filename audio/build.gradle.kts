@@ -11,6 +11,10 @@ android {
         minSdk = 31
     }
 
+    androidResources {
+        noCompress += "onnx"
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -24,5 +28,6 @@ kotlin {
 }
 
 dependencies {
+    implementation(libs.onnxruntime.android)
     testImplementation(libs.junit)
 }

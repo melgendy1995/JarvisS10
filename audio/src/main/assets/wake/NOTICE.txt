@@ -1,0 +1,38 @@
+openWakeWord models bundled with Jarvis
+========================================
+
+Files:
+  melspectrogram.onnx
+  embedding_model.onnx
+  hey_jarvis_v0.1.onnx
+
+Downloaded from the official v0.5.1 release assets (the v0.6.0 release
+ships no model files; the library still downloads these URLs):
+
+  https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/melspectrogram.onnx
+  https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.onnx
+  https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/hey_jarvis_v0.1.onnx
+
+Source repository: https://github.com/dscripka/openWakeWord
+Copyright 2022 David Scripka
+
+Code license: Apache License 2.0
+  https://www.apache.org/licenses/LICENSE-2.0
+
+Pre-trained models: Creative Commons Attribution-NonCommercial-ShareAlike 4.0
+International (CC BY-NC-SA 4.0). The project README says this covers all
+included pre-trained models, because training used datasets with unknown or
+restrictive licenses.
+  https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+The speech-embedding architecture comes from Google's speech_embedding
+TFHub module, which is Apache-2.0. The ONNX file here is the openWakeWord
+re-implementation shipped in the same release as the wake models.
+
+The v0.5.1 asset list has no separate "jarvis" (the single word) model.
+Pretrained wake models in that release: alexa, hey_jarvis, hey_mycroft,
+hey_rhasspy, timer, weather. Feature files: melspectrogram, embedding_model.
+Also present: silero_vad.onnx (not bundled; end of speech uses recognizer energy).
+
+ONNX Runtime on device is com.microsoft.onnxruntime:onnxruntime-android
+(MIT): https://github.com/microsoft/onnxruntime

@@ -7,6 +7,7 @@ import android.content.Intent
 import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 import com.jarvis.app.JarvisApplication
+import com.jarvis.app.system.ListenForegroundService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -37,6 +38,16 @@ class DebugAskReceiver : BroadcastReceiver() {
         if (intent.action == STATE_ACTION) {
             val name = intent.getStringExtra("state")
             if (!OrbDebug.force(name)) Log.w(TAG, "bad state")
+            return
+        }
+        if (intent.action == WAKE_ACTION) {
+            val path = intent.getStringExtra("path")?.trim().orEmpty()
+            if (path.isEmpty()) {
+                Log.w(TAG, "missing path")
+                return
+            }
+            Log.i(TAG, "debug wake $path")
+            ListenForegroundService.scoreWav(context, path, emit = true)
             return
         }
         if (intent.action != ACTION) return
@@ -83,6 +94,7 @@ class DebugAskReceiver : BroadcastReceiver() {
     companion object {
         const val ACTION = "com.jarvis.app.DEBUG_ASK"
         const val STATE_ACTION = "com.jarvis.app.DEBUG_STATE"
+        const val WAKE_ACTION = "com.jarvis.app.DEBUG_WAKE"
         const val TAG = "JarvisDebug"
 
         private val inFlight = AtomicBoolean(false)

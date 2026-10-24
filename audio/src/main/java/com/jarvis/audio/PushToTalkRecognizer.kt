@@ -34,6 +34,8 @@ class PushToTalkRecognizer(context: Context) {
     private var unavailable = false
     private var clientRetries = 0
     private var beginning = false
+    private var once = false
+    private var keepAlive = false
     var holding: Boolean = false
         private set
 
@@ -43,12 +45,33 @@ class PushToTalkRecognizer(context: Context) {
         val onFinal: (String) -> Unit,
         val onError: (message: String, hard: Boolean) -> Unit,
         val onFallbackCapture: () -> Unit = {},
+        val onRmsDb: (Float) -> Unit = {},
     )
 
     fun start(callbacks: Callbacks) {
         main.post {
             this.callbacks = callbacks
             holding = true
+            once = false
+            keepAlive = false
+            finished = false
+            unavailable = false
+            clientRetries = 0
+            begin()
+        }
+    }
+
+    /**
+     * One utterance with the finger up. [keepAlive] reports a soft timeout through
+     * [Callbacks.onError] so the caller can restart, instead of treating it as an empty result.
+     * The wake-word recorder must already be released.
+     */
+    fun listenOnce(callbacks: Callbacks, keepAlive: Boolean = false) {
+        main.post {
+            this.callbacks = callbacks
+            holding = false
+            once = true
+            this.keepAlive = keepAlive
             finished = false
             unavailable = false
             clientRetries = 0
@@ -74,9 +97,42 @@ class PushToTalkRecognizer(context: Context) {
         }
     }
 
+    /** End a [listenOnce] session. A newer hold is left running. */
+    fun stopOnce() {
+        main.post {
+            if (!once || holding) return@post
+            if (unavailable) {
+                unavailable = false
+                once = false
+                deliverFinal("")
+                return@post
+            }
+            val current = recognizer
+            if (current == null) {
+                deliverFinal("")
+                return@post
+            }
+            runCatching { current.stopListening() }
+        }
+    }
+
+    /** Drop the session without an empty final. Does not change [holding]. */
+    fun discard() {
+        main.post {
+            once = false
+            keepAlive = false
+            finished = true
+            callbacks = null
+            unavailable = false
+            destroyRecognizer()
+        }
+    }
+
     fun release() {
         main.post {
             holding = false
+            once = false
+            keepAlive = false
             callbacks = null
             finished = true
             unavailable = false
@@ -84,12 +140,14 @@ class PushToTalkRecognizer(context: Context) {
         }
     }
 
+    private fun armed(): Boolean = !finished && (holding || once)
+
     private fun begin() {
         if (beginning) return
         beginning = true
         try {
             destroyRecognizer()
-            if (!holding || finished) return
+            if (!armed()) return
             if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
                 beginFallback()
                 return
@@ -113,7 +171,7 @@ class PushToTalkRecognizer(context: Context) {
             ready = false
             recognizer = created
             created.setRecognitionListener(listener(generation))
-            if (recognizer !== created || generation != session || !holding) {
+            if (recognizer !== created || generation != session || !armed()) {
                 destroyRecognizer()
                 return
             }
@@ -161,6 +219,11 @@ class PushToTalkRecognizer(context: Context) {
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+            if (once) {
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 400L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 800L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1_200L)
+            }
         }
     }
 
@@ -194,6 +257,7 @@ class PushToTalkRecognizer(context: Context) {
 
         override fun onRmsChanged(rmsdB: Float) {
             if (generation != session) return
+            callbacks?.onRmsDb(rmsdB)
             val level = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
             callbacks?.onLevel(level)
         }
@@ -220,6 +284,33 @@ class PushToTalkRecognizer(context: Context) {
                 if (generation != session || finished) return@post
                 if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
                     deliverError(errorMessage(error), hard = true)
+                    destroyRecognizer()
+                    return@post
+                }
+                if (once) {
+                    if (!ready && isRetryable(error) && clientRetries < 1) {
+                        clientRetries++
+                        begin()
+                        return@post
+                    }
+                    if (!ready) {
+                        destroyRecognizer()
+                        beginFallback()
+                        return@post
+                    }
+                    if (keepAlive && isSoft(error)) {
+                        finished = true
+                        destroyRecognizer()
+                        callbacks?.onError("", false)
+                        return@post
+                    }
+                    if (isSoft(error)) {
+                        deliverFinal("")
+                        destroyRecognizer()
+                        return@post
+                    }
+                    val onceHard = !isSoft(error) && error != SpeechRecognizer.ERROR_CLIENT
+                    deliverError(errorMessage(error), onceHard)
                     destroyRecognizer()
                     return@post
                 }

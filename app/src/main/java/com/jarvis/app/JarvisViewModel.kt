@@ -3,14 +3,24 @@ package com.jarvis.app
 import android.Manifest
 import android.app.Application
 import android.content.pm.PackageManager
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.jarvis.app.system.ListenForegroundService
+import com.jarvis.app.system.MediaDuck
+import com.jarvis.app.system.WakeLog
+import com.jarvis.app.system.WakeRuntime
 import com.jarvis.audio.JarvisSpeaker
 import com.jarvis.audio.PcmMic
 import com.jarvis.audio.PcmSpeaker
 import com.jarvis.audio.PushToTalkRecognizer
 import com.jarvis.audio.SpeechEnvelope
+import com.jarvis.audio.wake.EnergyEndpointer
+import com.jarvis.audio.wake.WakeChime
+import com.jarvis.audio.wake.WakeConfig
+import com.jarvis.audio.wake.WakeHit
+import com.jarvis.audio.wake.WakePhrases
 import com.jarvis.core.brain.BrainRequest
 import com.jarvis.core.brain.BrainResult
 import com.jarvis.core.brain.ConversationTurn
@@ -29,6 +39,8 @@ import com.jarvis.provider.gemini.ModelConfig
 import com.jarvis.provider.groq.BackupSttPolicy
 import android.util.Log
 import java.io.ByteArrayOutputStream
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -79,12 +91,15 @@ private data class Spoken(
 private data class SpeechItem(
     val spoken: Spoken,
     val done: CompletableDeferred<Unit>,
+    val handsFree: Boolean = false,
 )
 
 class JarvisViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as JarvisApplication
     private val recognizer = PushToTalkRecognizer(application)
     private val speaker = JarvisSpeaker(application)
+    private val duck = MediaDuck(application)
+    private val chime = WakeChime(application)
     private val speechQueue = Channel<SpeechItem>(capacity = 16)
     private val _ui = MutableStateFlow(JarvisUiState())
     val ui = _ui.asStateFlow()
@@ -112,6 +127,14 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private var pendingPcm = ByteArray(0)
     private var sttFailure = ""
     private var lastBrainId = "phone"
+    private var handsFree = false
+    private var recognizerBusy = false
+    private var bargeSession = 0
+    private var bargeStop = false
+    private var lastSpoken = ""
+    private var listenId = 0
+    private var settledListen = -1
+    private var askedMic = false
 
     @Volatile private var liveActive = false
 
@@ -159,17 +182,35 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             for (item in speechQueue) {
                 val gen = generation
-                while (holding || liveActive) delay(40)
+                while (holding || liveActive || recognizerBusy) delay(40)
                 if (gen != generation || item.spoken.text.isBlank()) {
                     if (!item.done.isCompleted) item.done.complete(Unit)
+                    if (bargeStop && gen != generation && !holding) {
+                        bargeStop = false
+                        endHandsFree(quiet = true)
+                    } else if (item.handsFree && item.spoken.text.isBlank() && gen == generation && !holding) {
+                        endHandsFree(quiet = true)
+                    }
                     continue
                 }
+                val follow = item.handsFree && handsFree
                 try {
-                    speakAndWait(item.spoken)
+                    speakAndWait(item.spoken, resumeMic = !follow)
                 } finally {
                     if (!item.done.isCompleted) item.done.complete(Unit)
                 }
+                if (gen != generation || holding) {
+                    if (bargeStop && !holding) {
+                        bargeStop = false
+                        endHandsFree(quiet = true)
+                    }
+                    continue
+                }
+                if (follow && handsFree) startFollowUp(gen)
             }
+        }
+        viewModelScope.launch {
+            WakeRuntime.triggers.collect { hit -> onWakeHit(hit) }
         }
     }
 
@@ -187,8 +228,13 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             request(Manifest.permission.RECORD_AUDIO)
             return
         }
-        generation++
+        val gen = ++generation
         holding = true
+        handsFree = false
+        recognizerBusy = false
+        bargeStop = false
+        bargeSession++
+        listenId++
         pushLevel(0f)
         heard = null
         routed = false
@@ -199,7 +245,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         utteranceJob?.cancel()
         abandonLive()
         speaker.stop()
+        recognizer.discard()
         drainQueue()
+        duck.release()
         _ui.update {
             it.copy(
                 holding = true,
@@ -211,11 +259,20 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 reply = "",
             )
         }
-        recognizer.start(callbacks)
+        WakeLog.state("HOLDING")
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { WakeRuntime.pauseBlocking() }
+            if (!holding || gen != generation) {
+                if (!holding && gen == generation && !recognizerBusy) WakeRuntime.resume(speaking = false)
+                return@launch
+            }
+            recognizer.start(callbacks)
+        }
     }
 
     fun onHoldEnd() {
         if (!holding) return
+        val gen = generation
         holding = false
         pushLevel(0f)
         _ui.update { it.copy(holding = false) }
@@ -226,10 +283,25 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             waitForResult = viewModelScope.launch {
                 delay(3_500)
-                if (!routed && _ui.value.orb == OrbState.LISTENING) {
+                if (gen != generation || holding || routed) return@launch
+                if (_ui.value.orb == OrbState.LISTENING) {
                     showIdle("I didn't hear anything.")
                 }
             }
+        }
+    }
+
+    /** Android 12 starts the microphone foreground service only while this screen is visible. */
+    fun onScreenVisible() {
+        if (!hasPermission(Manifest.permission.RECORD_AUDIO)) {
+            if (!askedMic) {
+                askedMic = true
+                request(Manifest.permission.RECORD_AUDIO)
+            }
+            return
+        }
+        viewModelScope.launch {
+            ListenForegroundService.startWhileVisible(getApplication())
         }
     }
 
@@ -292,7 +364,10 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             showProblem("Microphone permission was denied.")
         } else if (granted && permission == Manifest.permission.RECORD_AUDIO) {
             _ui.update {
-                it.copy(reply = "Tap or hold the orb.", orb = OrbState.IDLE, accent = BrainAccent.PHONE, brain = "Phone")
+                it.copy(reply = "Tap or hold the orb. Say Hey Jarvis with the screen open once.", orb = OrbState.IDLE, accent = BrainAccent.PHONE, brain = "Phone")
+            }
+            viewModelScope.launch {
+                ListenForegroundService.startWhileVisible(getApplication())
             }
         }
     }
@@ -360,11 +435,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun deliver(text: String) {
+    private fun deliver(text: String, handsFreeTurn: Boolean = false) {
         utteranceJob?.cancel()
         val gen = generation
         utteranceJob = app.voiceScope.launch {
-            onRecognizedUtterance(text, gen)
+            onRecognizedUtterance(text, gen, handsFreeTurn)
         }
     }
 
@@ -372,7 +447,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
      * Recognizer result and DEBUG_ASK both enter here. The chain runs to the end
      * on the application voice scope, then this function speaks the answer.
      */
-    private suspend fun onRecognizedUtterance(text: String, gen: Int = generation) {
+    private suspend fun onRecognizedUtterance(
+        text: String,
+        gen: Int = generation,
+        handsFreeTurn: Boolean = false,
+    ) {
         Log.i(VOICE, "utterance begin chars=${text.length}")
         pushLevel(0f)
         _ui.update {
@@ -414,10 +493,10 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             record(TurnRole.USER, text, brainId)
             record(TurnRole.ASSISTANT, result.text, brainId)
         }
-        present(result, gen)
+        present(result, gen, handsFreeTurn)
     }
 
-    private suspend fun present(result: BrainResult, gen: Int) {
+    private suspend fun present(result: BrainResult, gen: Int, handsFreeTurn: Boolean) {
         when (result) {
             is BrainResult.Answer -> {
                 val accent = result.accent.toOrb()
@@ -425,19 +504,30 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 _ui.update { it.copy(accent = accent, brain = result.accent.label) }
                 if (result.audioPcm24k != null || result.followUp != null) {
                     liveActive = true
+                    var didLiveFollow = false
                     try {
+                        withContext(Dispatchers.IO) { WakeRuntime.pauseBlocking() }
                         val pcm = result.audioPcm24k
-                        if (pcm != null && pcm.isNotEmpty()) {
+                        if (pcm != null && pcm.isNotEmpty() && gen == generation && !holding) {
                             pushLevel(0f)
                             _ui.update {
                                 it.copy(orb = OrbState.SPEAKING, reply = result.text, level = 0f)
                             }
-                            playPcm(pcm)
-                        } else if (result.text.isNotBlank()) {
-                            speakAndWait(Spoken(result.text, accent, result.accent.label, result.brainId))
+                            WakeRuntime.resume(speaking = true)
+                            try {
+                                playPcm(pcm)
+                            } finally {
+                                withContext(Dispatchers.IO) { WakeRuntime.pauseBlocking() }
+                            }
+                        } else if (result.text.isNotBlank() && gen == generation) {
+                            speakAndWait(
+                                Spoken(result.text, accent, result.accent.label, result.brainId),
+                                resumeMic = false,
+                            )
                         }
                         val follow = result.followUp
                         if (follow != null && gen == generation && !holding) {
+                            didLiveFollow = true
                             runFollowUp(follow)
                         } else {
                             follow?.close()
@@ -445,8 +535,21 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     } finally {
                         liveActive = false
                     }
+                    if (gen == generation && !holding) {
+                        if (handsFreeTurn && handsFree && !didLiveFollow) {
+                            startFollowUp(gen)
+                        } else {
+                            endHandsFree(quiet = true)
+                        }
+                    } else if (bargeStop && !holding) {
+                        bargeStop = false
+                        endHandsFree(quiet = true)
+                    }
                 } else {
-                    speakQueued(Spoken(result.text, accent, result.accent.label, result.brainId))
+                    speakQueued(
+                        Spoken(result.text, accent, result.accent.label, result.brainId),
+                        handsFreeTurn && handsFree,
+                    )
                 }
             }
             is BrainResult.Failure -> {
@@ -458,14 +561,15 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                         "Offline",
                         result.brainId,
                     ),
+                    handsFreeTurn && handsFree,
                 )
             }
         }
     }
 
-    private suspend fun speakQueued(spoken: Spoken) {
+    private suspend fun speakQueued(spoken: Spoken, handsFreeTurn: Boolean) {
         val done = CompletableDeferred<Unit>()
-        speechQueue.send(SpeechItem(spoken, done))
+        speechQueue.send(SpeechItem(spoken, done, handsFreeTurn))
         done.await()
     }
 
@@ -576,11 +680,12 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private suspend fun speakAndWait(spoken: Spoken) {
+    private suspend fun speakAndWait(spoken: Spoken, resumeMic: Boolean) {
         Log.i(
             VOICE,
             "tts speak brain=${spoken.brainId} chars=${spoken.text.length} preview=${spokenPreview(spoken.text)}",
         )
+        lastSpoken = spoken.text
         _ui.update {
             it.copy(
                 orb = OrbState.SPEAKING,
@@ -592,6 +697,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
         mic?.muted = true
         pushLevel(0f)
+        WakeLog.state("SPEAKING")
+        ListenForegroundService.note(getApplication(), "Speaking")
+        val token = ++bargeSession
+        withContext(Dispatchers.IO) { WakeRuntime.pauseBlocking() }
+        if (token == bargeSession && !holding) startBargeListen(token)
         val started = System.nanoTime()
         try {
             kotlinx.coroutines.coroutineScope {
@@ -614,14 +724,265 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             }
         } finally {
             mic?.muted = false
-            if (!holding && _ui.value.orb == OrbState.SPEAKING) {
-                _ui.update { it.copy(orb = OrbState.IDLE, level = 0f) }
+            if (token == bargeSession) {
+                bargeSession++
+                recognizer.discard()
+                // discard() posts to the main looper. Leave this continuation so that
+                // post runs before another recorder opens.
+                withContext(Dispatchers.IO) { }
+                if (!holding && resumeMic && !bargeStop) {
+                    if (_ui.value.orb == OrbState.SPEAKING) {
+                        _ui.update { it.copy(orb = OrbState.IDLE, level = 0f) }
+                    }
+                    WakeRuntime.resume(speaking = false)
+                    if (!handsFree) {
+                        WakeLog.state("PASSIVE")
+                        ListenForegroundService.note(getApplication(), "Listening for Hey Jarvis")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun onWakeHit(hit: WakeHit) {
+        if (holding) {
+            WakeLog.i("trigger ignored while holding")
+            return
+        }
+        val score = String.format(Locale.US, "%.3f", hit.score)
+        WakeLog.trigger("score=$score duringSpeech=${hit.duringSpeech}")
+        val gen = ++generation
+        handsFree = true
+        bargeStop = false
+        bargeSession++
+        listenId++
+        recognizer.discard()
+        speaker.stop()
+        abandonLive()
+        utteranceJob?.cancel()
+        routeJob?.cancel()
+        waitForResult?.cancel()
+        armCommandListen(gen, playChime = true)
+    }
+
+    private fun armCommandListen(gen: Int, playChime: Boolean) {
+        recognizerBusy = true
+        heard = null
+        routed = false
+        sttFailure = ""
+        pendingPcm = ByteArray(0)
+        WakeLog.state("RECOGNIZING")
+        ListenForegroundService.note(getApplication(), "Listening")
+        pushLevel(0f)
+        _ui.update {
+            it.copy(
+                orb = OrbState.LISTENING,
+                level = 0f,
+                you = "",
+                holding = false,
+                accent = BrainAccent.PHONE,
+                brain = "",
+            )
+        }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { WakeRuntime.pauseBlocking() }
+            if (gen != generation || holding) {
+                if (gen == generation) recognizerBusy = false
+                return@launch
+            }
+            duck.acquireIfPlaying()
+            if (playChime) withContext(Dispatchers.IO) { chime.playAndWait() }
+            if (gen != generation || holding) return@launch
+            listenHandsFree(gen, followUp = false)
+        }
+    }
+
+    private fun startFollowUp(gen: Int) {
+        if (gen != generation || holding || !handsFree) return
+        WakeLog.state("FOLLOW_UP")
+        ListenForegroundService.note(getApplication(), "Listening")
+        pushLevel(0f)
+        _ui.update { it.copy(orb = OrbState.LISTENING, level = 0f, you = "") }
+        listenHandsFree(gen, followUp = true)
+    }
+
+    private fun listenHandsFree(gen: Int, followUp: Boolean) {
+        val id = ++listenId
+        val openedAt = SystemClock.elapsedRealtime()
+        val ended = AtomicBoolean(false)
+        val endpointer = EnergyEndpointer(
+            noSpeechTimeoutMs = if (followUp) WakeConfig.FOLLOW_UP_MS else 6_000L,
+        )
+        var restarts = 0
+        lateinit var callbacks: PushToTalkRecognizer.Callbacks
+        callbacks = PushToTalkRecognizer.Callbacks(
+            onLevel = { level ->
+                if (id == listenId && _ui.value.orb == OrbState.LISTENING) pushLevel(level)
+            },
+            onPartial = { text ->
+                if (id != listenId || gen != generation || holding || text.isBlank()) return@Callbacks
+                _ui.update { it.copy(you = text) }
+            },
+            onFinal = { text ->
+                if (id != listenId || gen != generation || holding) return@Callbacks
+                val elapsed = SystemClock.elapsedRealtime() - openedAt
+                val stillOpen = followUp && text.isBlank() && !endpointer.heardSpeech &&
+                    restarts < 4 && elapsed < WakeConfig.FOLLOW_UP_MS - 400
+                if (stillOpen) {
+                    restarts++
+                    ended.set(false)
+                    WakeLog.i("follow-up recognizer restarted $restarts elapsed=${elapsed}ms")
+                    recognizer.listenOnce(callbacks)
+                    return@Callbacks
+                }
+                finishHandsFree(id, text, gen, followUp, hard = false)
+            },
+            onError = { message, hard ->
+                if (id != listenId || gen != generation || holding) return@Callbacks
+                sttFailure = message
+                finishHandsFree(id, "", gen, followUp, hard)
+            },
+            onFallbackCapture = {
+                if (id != listenId || gen != generation || holding) return@Callbacks
+                finishHandsFree(id, "", gen, followUp, hard = false)
+            },
+            onRmsDb = { db ->
+                if (id != listenId || gen != generation || holding || ended.get()) return@Callbacks
+                if (endpointer.onRms(SystemClock.elapsedRealtime(), db) == EnergyEndpointer.Decision.END) {
+                    if (ended.compareAndSet(false, true)) recognizer.stopOnce()
+                }
+            },
+        )
+        recognizerBusy = true
+        recognizer.listenOnce(callbacks)
+    }
+
+    private fun finishHandsFree(id: Int, text: String, gen: Int, followUp: Boolean, hard: Boolean) {
+        if (id == settledListen || id != listenId || gen != generation || holding) return
+        settledListen = id
+        recognizerBusy = false
+        val line = text.trim()
+        if (line.isEmpty() || WakePhrases.isStop(line)) {
+            if (!followUp && line.isEmpty()) WakeLog.falseTrigger()
+            val quiet = followUp || WakePhrases.isStop(line)
+            val message = when {
+                quiet -> ""
+                hard && sttFailure.isNotBlank() -> sttFailure
+                else -> sttFailure.ifBlank { "I didn't hear anything." }
+            }
+            endHandsFree(quiet = quiet, message = message)
+            return
+        }
+        WakeLog.state("THINKING")
+        pushLevel(0f)
+        _ui.update {
+            it.copy(
+                orb = OrbState.THINKING,
+                level = 0f,
+                you = line,
+                holding = false,
+                brain = "",
+                accent = BrainAccent.PHONE,
+            )
+        }
+        deliver(line, handsFreeTurn = true)
+    }
+
+    private fun endHandsFree(quiet: Boolean, message: String = "") {
+        if (holding) return
+        handsFree = false
+        recognizerBusy = false
+        bargeStop = false
+        duck.release()
+        WakeRuntime.resume(speaking = false)
+        WakeLog.state("PASSIVE")
+        ListenForegroundService.note(getApplication(), "Listening for Hey Jarvis")
+        if (!quiet && message.isNotBlank()) {
+            showIdle(message)
+            return
+        }
+        if (_ui.value.orb != OrbState.ERROR) {
+            pushLevel(0f)
+            _ui.update { it.copy(orb = OrbState.IDLE, level = 0f, holding = false) }
+        }
+    }
+
+    private fun startBargeListen(token: Int) {
+        recognizer.listenOnce(
+            keepAlive = true,
+            callbacks = PushToTalkRecognizer.Callbacks(
+                onLevel = {},
+                onPartial = { text -> onBargeText(token, text, fromFinal = false) },
+                onFinal = { text -> onBargeText(token, text, fromFinal = true) },
+                onError = { _, _ -> restartBarge(token) },
+                onFallbackCapture = {
+                    if (token != bargeSession || holding) return@Callbacks
+                    WakeLog.i("barge recognizer unavailable, model gate ${WakeConfig.TTS_THRESHOLD}")
+                    WakeRuntime.resume(speaking = true)
+                },
+            ),
+        )
+    }
+
+    private fun restartBarge(token: Int) {
+        if (token != bargeSession || holding) return
+        viewModelScope.launch {
+            delay(200)
+            if (token != bargeSession || holding) return@launch
+            if (_ui.value.orb != OrbState.SPEAKING) return@launch
+            startBargeListen(token)
+        }
+    }
+
+    private fun onBargeText(token: Int, text: String, fromFinal: Boolean) {
+        if (token != bargeSession || holding || text.isBlank()) return
+        when (WakePhrases.barge(text, lastSpoken)) {
+            WakePhrases.Barge.NONE -> if (fromFinal) restartBarge(token)
+            WakePhrases.Barge.STOP -> {
+                WakeLog.i("barge stop")
+                generation++
+                bargeStop = true
+                bargeSession++
+                listenId++
+                speaker.stop()
+                recognizer.discard()
+            }
+            WakePhrases.Barge.WAKE -> {
+                val rest = WakePhrases.remainder(text)
+                WakeLog.i("barge wake rest=${!rest.isNullOrBlank()}")
+                val gen = ++generation
+                bargeStop = false
+                bargeSession++
+                handsFree = true
+                listenId++
+                speaker.stop()
+                recognizer.discard()
+                utteranceJob?.cancel()
+                if (!rest.isNullOrBlank()) {
+                    recognizerBusy = false
+                    WakeLog.state("THINKING")
+                    pushLevel(0f)
+                    _ui.update {
+                        it.copy(
+                            orb = OrbState.THINKING,
+                            level = 0f,
+                            you = rest,
+                            holding = false,
+                            brain = "",
+                            accent = BrainAccent.PHONE,
+                        )
+                    }
+                    deliver(rest, handsFreeTurn = true)
+                } else {
+                    armCommandListen(gen, playChime = true)
+                }
             }
         }
     }
 
     private fun showProblem(message: String) {
         routed = true
+        if (!holding && !recognizerBusy && !handsFree) WakeRuntime.resume(speaking = false)
         pushLevel(0f)
         _ui.update {
             it.copy(
@@ -647,6 +1008,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun showIdle(message: String) {
         routed = true
+        if (!holding && !recognizerBusy && !handsFree) WakeRuntime.resume(speaking = false)
         pushLevel(0f)
         _ui.update {
             it.copy(
@@ -751,6 +1113,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         if (captureOpen) utteranceMic.stop()
         captureOpen = false
         abandonLive()
+        duck.release()
         recognizer.release()
         speaker.shutdown()
         super.onCleared()

@@ -28,7 +28,6 @@ class AndroidAppControl(context: Context) : AppControl {
     private val packages = appContext.packageManager
     private val playback = PlaybackMonitor(appContext, onPlaybackStopped = { pkg ->
         Log.i(TAG, "auto-return after $pkg stopped")
-        ListenForegroundService.stop(appContext)
         KioskGate.returnToJarvis(appContext)
     })
 
@@ -343,7 +342,6 @@ class AndroidAppControl(context: Context) : AppControl {
         val arabic = slots["lang"] == "ar"
         playback.cancelKeep()
         playback.disarm()
-        ListenForegroundService.stop(appContext)
         KioskGate.returnToJarvis(appContext)
         return SkillResult(if (arabic) "رجعت." else "Back.")
     }

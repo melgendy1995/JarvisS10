@@ -57,9 +57,9 @@ If the phone is not the owner but screen pinning has Jarvis locked, Jarvis calls
 
 ## Android 12 while another app is in front
 
-Jarvis is hold-to-talk. The microphone button is on the Jarvis screen, so listening does not continue over YouTube. A capture would also take audio focus and pause the video.
+Hey Jarvis keeps listening while YouTube is in front. The wake recorder starts in a microphone foreground service while Jarvis is still visible, then stays up after the other app opens. It uses `VOICE_RECOGNITION` and does not take audio focus, so playback keeps going until a real wake ducks it. Hold the orb for push-to-talk if the wake word misses. Details, licenses, and the debug wav command are in `docs/WAKE_WORD.md`.
 
-When Jarvis leaves the screen it starts a foreground service of type `microphone` while it is still visible, with a notification. Android 12 refuses to start that service from the background, and it refuses microphone access in the background unless a microphone foreground service was started from the foreground. The service does not record. Commands still arrive through the voice loop while the activity is alive, including the debug broadcast `com.jarvis.app.DEBUG_ASK`. Speech uses assistant audio so a short reply ducks the player instead of pausing it. If a reply still pauses YouTube, Jarvis sends play again for a few seconds. "pause" cancels that.
+Android 12 refuses to start that service from the background, and it refuses microphone access in the background unless a microphone foreground service was started from the foreground. Leaving YouTube or saying "back" does not stop the service. Commands still arrive through the voice loop while the activity is alive, including the debug broadcast `com.jarvis.app.DEBUG_ASK`. If the activity is destroyed, the service still detects the wake word, and speech waits until Jarvis is visible again. Speech uses assistant audio so a short reply ducks the player instead of pausing it. If a reply still pauses YouTube, Jarvis sends play again for a few seconds. "pause" cancels that.
 
 The notification needs no extra permission on Android 12. Android 13 and later also need notification permission before the text is visible. The service can still run.
 
