@@ -2,15 +2,21 @@ package com.jarvis.app
 
 import android.app.Application
 import android.util.Log
+import com.jarvis.app.system.AndroidCameraController
 import com.jarvis.app.system.AndroidCoarseLocation
 import com.jarvis.app.system.AppTimerScheduler
+import com.jarvis.app.system.CameraPasswordStore
+import com.jarvis.app.system.CameraPortStore
 import com.jarvis.app.system.CameraTorchController
 import com.jarvis.app.system.OpenMeteoClient
+import com.jarvis.app.system.StreamAddressLookup
 import com.jarvis.core.CommandRouter
 import com.jarvis.core.brain.BrainChain
 import com.jarvis.core.brain.BrainResult
 import com.jarvis.app.system.AndroidAppControl
+import com.jarvis.core.camera.CameraEndpoints
 import com.jarvis.core.skills.AppControlSkill
+import com.jarvis.core.skills.CameraSkill
 import com.jarvis.core.skills.FlashlightSkill
 import com.jarvis.core.skills.MemorySkill
 import com.jarvis.core.skills.SkillRegistry
@@ -66,7 +72,11 @@ class JarvisApplication : Application() {
     lateinit var whisper: GroqWhisperStt
         private set
 
+    lateinit var cameraPasswords: CameraPasswordStore
+        private set
+
     private lateinit var bearerStore: KeystoreBearerStore
+    private lateinit var cameraPorts: CameraPortStore
     private lateinit var groqBrain: GroqBrain
     private lateinit var geminiText: GeminiTextBrain
     private lateinit var network: NetworkStatus
@@ -108,6 +118,10 @@ class JarvisApplication : Application() {
         registry.register(TimerSkill(timers))
         registry.register(FlashlightSkill(CameraTorchController(this)))
         registry.register(MemorySkill(RoomMemory(memory)))
+        cameraPasswords = CameraPasswordStore(this)
+        cameraPorts = CameraPortStore(this)
+        // Ahead of app launch so "start the camera" is the stream, not the camera app.
+        registry.register(CameraSkill(AndroidCameraController(this)))
         registry.register(AppControlSkill(AndroidAppControl(this)))
         router = CommandRouter(registry)
         firebaseReady = GeminiFirebase.install(this)
@@ -192,6 +206,18 @@ class JarvisApplication : Application() {
     fun groqKeystoreOpen(): Boolean = bearerStore.isOpen()
 
     fun saveGroqBearer(token: String): Boolean = bearerStore.set(token)
+
+    fun cameraPasswordSaved(): Boolean = cameraPasswords.get().isNotEmpty()
+
+    fun cameraKeystoreOpen(): Boolean = cameraPasswords.isOpen()
+
+    fun saveCameraPassword(password: String): Boolean = cameraPasswords.set(password)
+
+    fun cameraPort(): Int = cameraPorts.get()
+
+    fun saveCameraPort(port: Int): Boolean = cameraPorts.set(port)
+
+    fun cameraEndpoints(): CameraEndpoints = StreamAddressLookup.lookup(cameraPort())
 
     /** Gemini or Groq can still answer, so a failed on-device transcript is worth a Whisper call. */
     fun cloudBrainReachable(): Boolean {

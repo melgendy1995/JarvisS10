@@ -12,14 +12,21 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.Text
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -46,6 +53,7 @@ import com.jarvis.app.JarvisEvent
 import com.jarvis.app.JarvisViewModel
 import com.jarvis.app.R
 import com.jarvis.app.debug.OrbDebug
+import com.jarvis.app.system.CameraRuntime
 import com.jarvis.app.system.JarvisAccessibilityService
 import com.jarvis.orb.OrbView
 import kotlinx.coroutines.delay
@@ -106,6 +114,7 @@ fun JarvisScreen(viewModel: JarvisViewModel) {
     }
 
     val overlay = ui.personaOpen || ui.groqSettings
+    val streaming by CameraRuntime.streaming.collectAsStateWithLifecycle()
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (!overlay) {
             Row(
@@ -166,11 +175,45 @@ fun JarvisScreen(viewModel: JarvisViewModel) {
                     proxyReady = ui.groqProxyReady,
                     bearerSaved = ui.groqBearerSaved,
                     keystoreReady = ui.groqKeystoreReady,
+                    cameraPasswordSaved = ui.cameraPasswordSaved,
+                    cameraKeystoreReady = ui.cameraKeystoreReady,
+                    cameraPort = ui.cameraPort,
+                    cameraLan = ui.cameraLan,
+                    cameraTailscale = ui.cameraTailscale,
                     onSave = viewModel::saveGroqBearer,
+                    onSaveCamera = viewModel::saveCameraAccess,
                     onClose = viewModel::closeGroqSettings,
                 )
             }
         }
+        if (streaming) {
+            StreamingMark(Modifier.align(Alignment.TopStart))
+        }
+    }
+}
+
+@Composable
+private fun StreamingMark(modifier: Modifier = Modifier) {
+    val live = Color(0xFFFF2A2A)
+    Row(
+        modifier = modifier
+            .windowInsetsPadding(WindowInsets.displayCutout)
+            .padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .size(10.dp)
+                .background(live, CircleShape),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = "LIVE",
+            color = live,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 2.sp,
+        )
     }
 }
 

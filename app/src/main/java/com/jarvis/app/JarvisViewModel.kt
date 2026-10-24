@@ -76,6 +76,11 @@ data class JarvisUiState(
     val personaOpen: Boolean = false,
     val personaName: String = "Mahmoud",
     val personaText: String = "",
+    val cameraPasswordSaved: Boolean = false,
+    val cameraKeystoreReady: Boolean = true,
+    val cameraPort: Int = 8088,
+    val cameraLan: String = "",
+    val cameraTailscale: String = "",
     val weatherLabel: String? = null,
     val sources: List<SearchSource> = emptyList(),
     val searchHtml: String? = null,
@@ -312,6 +317,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun openGroqSettings() {
+        val ends = app.cameraEndpoints()
         _ui.update {
             it.copy(
                 groqSettings = true,
@@ -319,6 +325,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 groqProxyReady = app.groqProxyConfigured(),
                 groqBearerSaved = app.groqBearerSaved(),
                 groqKeystoreReady = app.groqKeystoreOpen(),
+                cameraPasswordSaved = app.cameraPasswordSaved(),
+                cameraKeystoreReady = app.cameraKeystoreOpen(),
+                cameraPort = app.cameraPort(),
+                cameraLan = ends.lanText(),
+                cameraTailscale = ends.tailscaleText(),
             )
         }
     }
@@ -359,6 +370,23 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 groqSettings = !saved,
                 groqBearerSaved = app.groqBearerSaved(),
                 groqKeystoreReady = app.groqKeystoreOpen(),
+            )
+        }
+    }
+
+    /** A blank password field does not erase a password that is already stored. */
+    fun saveCameraAccess(password: String, portText: String) {
+        val port = portText.trim().toIntOrNull()
+        if (port != null) app.saveCameraPort(port)
+        if (password.isNotEmpty()) app.saveCameraPassword(password)
+        val ends = app.cameraEndpoints()
+        _ui.update {
+            it.copy(
+                cameraPasswordSaved = app.cameraPasswordSaved(),
+                cameraKeystoreReady = app.cameraKeystoreOpen(),
+                cameraPort = app.cameraPort(),
+                cameraLan = ends.lanText(),
+                cameraTailscale = ends.tailscaleText(),
             )
         }
     }

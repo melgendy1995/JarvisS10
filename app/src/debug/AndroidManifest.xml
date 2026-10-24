@@ -8,6 +8,8 @@
                 <action android:name="com.jarvis.app.DEBUG_ASK" />
                 <action android:name="com.jarvis.app.DEBUG_STATE" />
                 <action android:name="com.jarvis.app.DEBUG_WAKE" />
+                <action android:name="com.jarvis.app.DEBUG_CAMERA_PASSWORD" />
+                <action android:name="com.jarvis.app.DEBUG_CAMERA" />
             </intent-filter>
         </receiver>
     </application>

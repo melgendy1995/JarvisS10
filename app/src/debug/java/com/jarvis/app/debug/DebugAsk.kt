@@ -7,6 +7,7 @@ import android.content.Intent
 import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 import com.jarvis.app.JarvisApplication
+import com.jarvis.app.system.CameraStreamService
 import com.jarvis.app.system.ListenForegroundService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +51,14 @@ class DebugAskReceiver : BroadcastReceiver() {
             ListenForegroundService.scoreWav(context, path, emit = true)
             return
         }
+        if (intent.action == CAMERA_PASSWORD_ACTION) {
+            storeCameraPassword(context, intent)
+            return
+        }
+        if (intent.action == CAMERA_ACTION) {
+            runCamera(context, intent)
+            return
+        }
         if (intent.action != ACTION) return
         val question = intent.getStringExtra("q")?.trim().orEmpty()
         val gemini = intent.getBooleanExtra("gemini", true)
@@ -91,10 +100,57 @@ class DebugAskReceiver : BroadcastReceiver() {
         }
     }
 
+    private fun storeCameraPassword(context: Context, intent: Intent) {
+        val app = context.applicationContext as? JarvisApplication
+        if (app == null) {
+            Log.w(TAG, "application is not ready")
+            return
+        }
+        if (intent.getBooleanExtra("clear", false)) {
+            val ok = app.saveCameraPassword("")
+            Log.i(TAG, if (ok) "camera password cleared" else "camera password clear failed")
+            return
+        }
+        val password = intent.getStringExtra("p").orEmpty()
+        if (password.length < 8 || password.length > 128) {
+            Log.w(TAG, "camera password rejected")
+            return
+        }
+        val ok = app.saveCameraPassword(password)
+        Log.i(TAG, if (ok) "camera password stored" else "camera password store failed")
+    }
+
+    private fun runCamera(context: Context, intent: Intent) {
+        val op = intent.getStringExtra("op")?.trim().orEmpty()
+        if (op != "on" && op != "off" && op != "switch") {
+            Log.w(TAG, "camera op rejected")
+            return
+        }
+        val pending = goAsync()
+        askScope.launch {
+            try {
+                val outcome = when (op) {
+                    "on" -> CameraStreamService.start(context)
+                    "off" -> CameraStreamService.stop(context)
+                    else -> CameraStreamService.switch(context)
+                }
+                Log.i(TAG, "camera op=$op outcome=$outcome")
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                Log.w(TAG, "camera op failed: ${error.javaClass.simpleName}")
+            } finally {
+                pending.finish()
+            }
+        }
+    }
+
     companion object {
         const val ACTION = "com.jarvis.app.DEBUG_ASK"
         const val STATE_ACTION = "com.jarvis.app.DEBUG_STATE"
         const val WAKE_ACTION = "com.jarvis.app.DEBUG_WAKE"
+        const val CAMERA_PASSWORD_ACTION = "com.jarvis.app.DEBUG_CAMERA_PASSWORD"
+        const val CAMERA_ACTION = "com.jarvis.app.DEBUG_CAMERA"
         const val TAG = "JarvisDebug"
 
         private val inFlight = AtomicBoolean(false)
