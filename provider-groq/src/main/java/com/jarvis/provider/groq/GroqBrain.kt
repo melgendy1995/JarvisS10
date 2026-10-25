@@ -403,6 +403,7 @@ class GroqBrain(
                         accent = accent,
                         text = outcome.text,
                         needsPermission = outcome.needsPermission,
+                        toolRan = outcome.toolRan,
                     )
                 }
                 is Turn.Limited -> {
@@ -514,6 +515,7 @@ class GroqBrain(
         }
         var spent = 0
         var permission: String? = null
+        var toolRan = false
         val toolText = StringBuilder()
         for (round in 0..MAX_TOOL_ROUNDS) {
             val result = try {
@@ -534,7 +536,7 @@ class GroqBrain(
                         val text = result.message.content?.trim().orEmpty().ifBlank { toolText.toString().trim() }
                         if (text.isEmpty()) return Turn.Unavailable
                         if (spent == 0) spent = fitted.estimatedTokens.coerceAtLeast(1)
-                        return Turn.Spoken(text, spent, permission)
+                        return Turn.Spoken(text, spent, permission, toolRan)
                     }
                     messages += OutgoingMessage(
                         role = "assistant",
@@ -542,8 +544,9 @@ class GroqBrain(
                         toolCalls = calls,
                     )
                     for (call in calls) {
-                        val (spoken, needed) = runTool(utterance, call)
+                        val (spoken, needed, ran) = runTool(utterance, call)
                         if (permission == null) permission = needed
+                        if (ran) toolRan = true
                         if (spoken.isNotBlank()) {
                             if (toolText.isNotEmpty()) toolText.append(' ')
                             toolText.append(spoken)
@@ -560,7 +563,7 @@ class GroqBrain(
         return Turn.Unavailable
     }
 
-    private suspend fun runTool(utterance: String, call: ToolCallSpec): Pair<String, String?> {
+    private suspend fun runTool(utterance: String, call: ToolCallSpec): Triple<String, String?, Boolean> {
         val skill = registry.registered().firstOrNull { it.id == call.name }
         val slots = parseSlots(call.arguments)
         if ("millis" !in slots && "duration_ms" in slots) {
@@ -576,7 +579,7 @@ class GroqBrain(
                 SkillResult("That didn't work.", success = false)
             }
         }
-        return result.text to result.needsPermission
+        return Triple(result.text, result.needsPermission, skill != null)
     }
 
     private fun parseSlots(arguments: String): MutableMap<String, String> {
@@ -599,6 +602,7 @@ class GroqBrain(
             val text: String,
             val tokens: Int,
             val needsPermission: String?,
+            val toolRan: Boolean = false,
         ) : Turn
 
         data class Limited(val retryAfter: Duration?, val daily: Boolean) : Turn

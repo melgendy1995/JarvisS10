@@ -154,6 +154,7 @@ class GeminiLiveBrain(
                         needsPermission = first.needsPermission,
                         audioPcm24k = first.pcm.takeIf { it.isNotEmpty() },
                         followUp = if (first.keepOpen) session else null,
+                        toolRan = first.toolRan,
                     ).also {
                         if (!first.keepOpen) session.close()
                     }
@@ -194,6 +195,7 @@ private class FirstTurn(
     val pcm: ByteArray,
     val needsPermission: String?,
     val keepOpen: Boolean,
+    val toolRan: Boolean = false,
 )
 
 private sealed interface Note {
@@ -231,6 +233,7 @@ private class GeminiLiveSession(
 
     @Volatile var lastDetail: String = ""
     @Volatile var modelRejected: Boolean = false
+    @Volatile private var toolRan = false
 
     suspend fun open(utterance: String): FirstTurn? {
         val deferred = CompletableDeferred<FirstTurn?>()
@@ -419,6 +422,7 @@ private class GeminiLiveSession(
             val outcome = SkillTools.respond(registry, utterance, function)
             Transcripts.append(transcript, outcome.spoken)
             if (permission == null) permission = outcome.needsPermission
+            if (outcome.ran) toolRan = true
             outcome.part
         }
         if (parts.isNotEmpty()) {
@@ -455,7 +459,7 @@ private class GeminiLiveSession(
         val pcm = audio.toByteArray()
         val text = transcript.toString().trim()
         if (pcm.isEmpty() && text.isEmpty()) return null
-        return FirstTurn(text, pcm, permission, keepOpen && !intentional.get())
+        return FirstTurn(text, pcm, permission, keepOpen && !intentional.get(), toolRan)
     }
 
     private fun reconnect(): Boolean {

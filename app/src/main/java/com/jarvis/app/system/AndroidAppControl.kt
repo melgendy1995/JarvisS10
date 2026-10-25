@@ -128,13 +128,18 @@ class AndroidAppControl(context: Context) : AppControl {
 
     private suspend fun playOnYouTubeMusic(query: String, arabic: Boolean, directStarted: Boolean): SkillResult {
         var tapStarted = false
-        if (!directStarted && openYouTubeMusicSearch(query)) {
-            Log.i(TAG, "ytm search opened")
-            val service = awaitYouTubeService()
-            if (service == null) {
-                Log.i(TAG, "ytm accessibility missing, tapping skipped")
-            } else {
-                tapStarted = tapYouTubeMusicResult(service)
+        if (!directStarted) {
+            // Rows visible before this search belong to the previous query. Keep them
+            // so the wait below can tell fresh results from stale leftovers.
+            val stale = JarvisAccessibilityService.instance?.snapshot() ?: emptyList()
+            if (openYouTubeMusicSearch(query)) {
+                Log.i(TAG, "ytm search opened")
+                val service = awaitYouTubeService()
+                if (service == null) {
+                    Log.i(TAG, "ytm accessibility missing, tapping skipped")
+                } else {
+                    tapStarted = tapYouTubeMusicResult(service, query, stale)
+                }
             }
         }
         val youtubeAvailable = youtubeInstalled()
@@ -165,12 +170,23 @@ class AndroidAppControl(context: Context) : AppControl {
         return startExternal(AppMatcher.YOUTUBE_MUSIC, search)
     }
 
-    private suspend fun tapYouTubeMusicResult(service: JarvisAccessibilityService): Boolean {
+    private suspend fun tapYouTubeMusicResult(
+        service: JarvisAccessibilityService,
+        query: String,
+        stale: List<UiNode>,
+    ): Boolean {
         Log.i(TAG, "ytm screen ${service.screenWidth()}x${service.screenHeight()} enabled=${JarvisAccessibilityService.isEnabled(appContext)}")
         for (attempt in 0 until 3) {
-            if (attempt == 0 && !awaitYouTubeMusicResults(service)) {
-                Log.i(TAG, "ytm results did not appear")
-                return false
+            if (attempt == 0) {
+                if (awaitFreshYouTubeMusicResults(service, query, stale)) {
+                    Log.i(TAG, "ytm results fresh for the new query")
+                } else if (awaitYouTubeMusicResults(service)) {
+                    // Older than ~4s and still the last search's rows: tap as before.
+                    Log.i(TAG, "ytm results did not turn fresh, falling back")
+                } else {
+                    Log.i(TAG, "ytm results did not appear")
+                    return false
+                }
             }
             if (attempt > 0) delay(800)
             val nodes = service.snapshot()
@@ -204,6 +220,26 @@ class AndroidAppControl(context: Context) : AppControl {
             delay(300)
         }
         return false
+    }
+
+    /** Polls every 250 ms so leftover rows of the previous search are not tapped. */
+    private suspend fun awaitFreshYouTubeMusicResults(
+        service: JarvisAccessibilityService,
+        query: String,
+        stale: List<UiNode>,
+    ): Boolean {
+        repeat(16) {
+            val nodes = service.snapshot()
+            if (YouTubeMusicResultPicker.readyFor(nodes, query, stale) &&
+                YouTubeMusicResultPicker.bestPlayable(nodes) != null
+            ) {
+                return true
+            }
+            delay(250)
+        }
+        val last = service.snapshot()
+        return YouTubeMusicResultPicker.readyFor(last, query, stale) &&
+            YouTubeMusicResultPicker.bestPlayable(last) != null
     }
 
     private suspend fun playOnYouTube(query: String, arabic: Boolean): SkillResult {
@@ -365,6 +401,8 @@ class AndroidAppControl(context: Context) : AppControl {
         var via = "key"
         val chosen = MediaSessionPicker.choose(controllers.map { it.session }, target)
         val picked = chosen?.let { pick -> controllers.first { it.session.packageName == pick.packageName } }
+        val stateBefore = picked?.session?.state ?: MediaSessionPicker.STATE_NONE
+        val playingBefore = stateBefore == MediaSessionPicker.STATE_PLAYING || anyWatchedStarted()
         if (picked != null) {
             pkg = picked.session.packageName
             try {
@@ -395,6 +433,17 @@ class AndroidAppControl(context: Context) : AppControl {
         }
         if (which == "pause" && played) {
             return SkillResult(if (arabic) "ما قدرت أوقفه." else "I couldn't pause it.", success = false)
+        }
+        val decision = MediaFeedback.decide(
+            which = which,
+            arabic = arabic,
+            picked = pkg != "none",
+            stateBefore = stateBefore,
+            stateAfter = state,
+            playingBefore = playingBefore,
+        )
+        if (decision is MediaFeedback.MediaOutcome.Message) {
+            return SkillResult(decision.text, decision.success)
         }
         val text = when (which) {
             "pause" -> if (arabic) "تم الإيقاف." else "Paused."

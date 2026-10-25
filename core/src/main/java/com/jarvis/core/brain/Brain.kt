@@ -93,6 +93,8 @@ sealed class BrainResult {
         val shelf: String? = null,
         /** Google Search suggestions and sources. Null when the answer was not grounded. */
         val search: SearchDisplay? = null,
+        /** True when a brain turn actually ran a phone skill, so its claims are earned. */
+        val toolRan: Boolean = false,
     ) : BrainResult()
 
     data class Failure(

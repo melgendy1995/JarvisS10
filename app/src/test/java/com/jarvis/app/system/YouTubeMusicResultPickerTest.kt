@@ -2,7 +2,9 @@ package com.jarvis.app.system
 
 import com.jarvis.core.skills.UiNode
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** YT Music search-page picking, fed the strings the app publishes. */
@@ -86,5 +88,70 @@ class YouTubeMusicResultPickerTest {
     fun ignoresUnclickableRows() {
         val label = node(text = "Waka Waka • Song • Shakira", clickable = false, top = 600, height = 140)
         assertNull(YouTubeMusicResultPicker.bestPlayable(listOf(label)))
+    }
+
+    @Test
+    fun arabicResultsForTheNewQueryAreReady() {
+        val fresh = listOf(
+            node(text = "سورة الكهف - ياسر الدوسري • أغنية", clickable = true, top = 500),
+        )
+        val stale = listOf(
+            node(text = "Coldplay Yellow • Song", clickable = true, top = 500),
+        )
+        assertTrue(YouTubeMusicResultPicker.readyFor(fresh, "سورة الكهف", stale))
+    }
+
+    @Test
+    fun leftoverResultsOfThePreviousSearchAreNotReady() {
+        val stale = listOf(
+            node(text = "Coldplay Yellow • Song", clickable = true, top = 500),
+            node(text = "Coldplay Yellow (Audio) • Video", clickable = true, top = 680),
+        )
+        assertFalse(YouTubeMusicResultPicker.readyFor(stale, "سورة الكهف", stale))
+    }
+
+    @Test
+    fun englishResultsMatchTheirQueryToken() {
+        val fresh = listOf(
+            node(text = "Yellow - Coldplay • Song", clickable = true, top = 500),
+        )
+        assertTrue(YouTubeMusicResultPicker.readyFor(fresh, "yellow coldplay", emptyList()))
+    }
+
+    @Test
+    fun anEmptyPreviousSnapshotRequiresTheQueryToken() {
+        val stale = listOf(
+            node(text = "Coldplay Yellow • Song", clickable = true, top = 500),
+        )
+        assertFalse(YouTubeMusicResultPicker.readyFor(stale, "سورة الكهف", emptyList()))
+        assertTrue(YouTubeMusicResultPicker.readyFor(stale, "yellow coldplay", emptyList()))
+    }
+
+    @Test
+    fun changedRowsWithoutAQueryTokenStillCountAsFresh() {
+        val previous = listOf(
+            node(text = "Coldplay Yellow • Song", clickable = true, top = 500),
+        )
+        val changed = listOf(
+            node(text = "Amr Diab • Song", clickable = true, top = 500),
+        )
+        assertTrue(YouTubeMusicResultPicker.readyFor(changed, " غير معروف ", previous))
+    }
+
+    @Test
+    fun navRowsNeverCountAsResults() {
+        val nav = listOf(
+            node(desc = "Search", clickable = true, top = 0),
+            node(desc = "Explore", clickable = true, top = 2200),
+        )
+        assertFalse(YouTubeMusicResultPicker.readyFor(nav, "سورة الكهف", emptyList()))
+    }
+
+    @Test
+    fun stopWordsDoNotMisleadTheTokenCheck() {
+        val tokens = YouTubeMusicResultPicker.significantTokens("play surah? الكهف please")
+        assertFalse(tokens.contains("play"))
+        assertFalse(tokens.contains("please"))
+        assertTrue(tokens.contains("الكهف"))
     }
 }

@@ -18,6 +18,7 @@ internal data class ToolOutcome(
     val part: FunctionResponsePart,
     val spoken: String,
     val needsPermission: String?,
+    val ran: Boolean,
 )
 
 internal object SkillTools {
@@ -70,7 +71,7 @@ internal object SkillTools {
         } else {
             FunctionResponsePart(call.name, json, id)
         }
-        return ToolOutcome(part, result.text, result.needsPermission)
+        return ToolOutcome(part, result.text, result.needsPermission, ran = skill != null)
     }
 
     private fun schemaFor(name: String, spec: Map<*, *>): Schema {

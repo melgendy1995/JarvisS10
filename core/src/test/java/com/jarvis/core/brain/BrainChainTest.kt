@@ -283,6 +283,79 @@ class BrainChainTest {
         assertTrue(failure.text.contains("cooling down", ignoreCase = true))
     }
 
+    @Test
+    fun aClaimedPhoneActionIsReroutedToTheLocalSkill() = runBlocking {
+        val skillRouter = CommandRouter(
+            SkillRegistry().apply {
+                register(object : Skill {
+                    override val id = "app_control"
+                    override fun match(text: String): SkillCall? {
+                        return if (text.trim() in setOf("pause music", "stop music")) {
+                            SkillCall(id, text)
+                        } else {
+                            null
+                        }
+                    }
+
+                    override fun geminiDeclaration(): Any? = null
+                    override fun groqTool(): Any? = null
+                    override suspend fun run(call: SkillCall) = SkillResult("Paused.")
+                })
+            },
+        )
+        val groq = fake("groq") {
+            BrainResult.Answer("groq", BrainAccent.GROQ, "I have stopped the music.")
+        }
+        val result = BrainChain(skillRouter, listOf(groq)).reply(BrainRequest("no no no")) as BrainResult.Answer
+        assertEquals("Paused.", result.text)
+        assertEquals(BrainAccent.PHONE, result.accent)
+    }
+
+    @Test
+    fun aClaimWithoutACommandBecomesHonest() = runBlocking {
+        val groq = fake("groq") {
+            BrainResult.Answer("groq", BrainAccent.GROQ, "Shuffle mode is now active on YouTube Music.")
+        }
+        val result = BrainChain(router, listOf(groq)).reply(BrainRequest("shuffle")) as BrainResult.Answer
+        assertEquals("I couldn't do that. Try saying 'pause YouTube Music'.", result.text)
+        assertEquals("groq", result.brainId)
+    }
+
+    @Test
+    fun theClaimVerbRerouteRunsBeforeTheHonestFallback() = runBlocking {
+        val skillRouter = CommandRouter(
+            SkillRegistry().apply {
+                register(object : Skill {
+                    override val id = "app_control"
+                    override fun match(text: String): SkillCall? {
+                        return if (text.trim() == "stop music") SkillCall(id, text) else null
+                    }
+
+                    override fun geminiDeclaration(): Any? = null
+                    override fun groqTool(): Any? = null
+                    override suspend fun run(call: SkillCall) = SkillResult("تم الإيقاف.")
+                })
+            },
+        )
+        val groq = fake("groq") {
+            BrainResult.Answer("groq", BrainAccent.GROQ, "I have paused the media for you, Mahmoud.")
+        }
+        val lines = mutableListOf<String>()
+        val result = BrainChain(skillRouter, listOf(groq), lines::add)
+            .reply(BrainRequest("Still not stop")) as BrainResult.Answer
+        assertEquals("تم الإيقاف.", result.text)
+        assertTrue(lines.any { it.startsWith("guard claim=media_stop action=routed") })
+    }
+
+    @Test
+    fun aBrainThatRanItsToolKeepsItsAnswer() = runBlocking {
+        val groq = fake("groq") {
+            BrainResult.Answer("groq", BrainAccent.GROQ, "I have paused the media.", toolRan = true)
+        }
+        val result = BrainChain(router, listOf(groq)).reply(BrainRequest("no no no")) as BrainResult.Answer
+        assertEquals("I have paused the media.", result.text)
+    }
+
     private fun fake(id: String, handler: suspend (BrainRequest) -> BrainResult): FakeBrain {
         return FakeBrain(id, handler)
     }

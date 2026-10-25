@@ -49,10 +49,43 @@ class BrainChain(
         ) {
             log("stale-answer retry forced=live-search")
             val retried = runBrains(request.copy(forceLiveSearch = true), skip = answer.brainId) { last = it }
-            if (retried is BrainResult.Answer) return logAnswer(retried, started)
+            if (retried is BrainResult.Answer) return guard(request, logAnswer(retried, started))
         }
-        if (answer is BrainResult.Answer) return logAnswer(answer, started)
+        if (answer is BrainResult.Answer) return guard(request, logAnswer(answer, started))
         return logOffline(last, started)
+    }
+
+    /**
+     * Cloud brains like to confirm actions the phone never made. When a reply
+     * claims one, reroute what the user said (or the closest command rebuilt
+     * from the claim) so a real skill answers, else speak an honest line.
+     */
+    private suspend fun guard(request: BrainRequest, answer: BrainResult.Answer): BrainResult.Answer {
+        if (answer.toolRan) return answer
+        val claim = ActionClaimGuard.detect(answer.text) ?: return answer
+        val attempts = sequenceOf(request.utterance).plus(
+            ActionClaimGuard.canonical(claim)?.let { sequenceOf(it) } ?: emptySequence(),
+        ).filter { it.isNotBlank() }
+        for (candidate in attempts) {
+            val routed = router.route(candidate)
+            if (CommandRouter.isMiss(routed)) continue
+            log("guard claim=${claim.id} action=routed")
+            return BrainResult.Answer(
+                brainId = answer.brainId,
+                accent = BrainAccent.PHONE,
+                text = routed.text,
+                success = routed.success,
+                needsPermission = routed.needsPermission,
+                shelf = routed.shelf,
+            )
+        }
+        log("guard claim=${claim.id} action=honest")
+        return answer.copy(
+            text = ActionClaimGuard.honest(claim),
+            audioPcm24k = null,
+            search = null,
+            shelf = null,
+        )
     }
 
     private fun logAnswer(answer: BrainResult.Answer, started: Long): BrainResult.Answer {

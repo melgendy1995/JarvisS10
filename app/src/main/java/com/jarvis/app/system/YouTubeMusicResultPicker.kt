@@ -1,6 +1,7 @@
 package com.jarvis.app.system
 
 import com.jarvis.core.skills.UiNode
+import com.jarvis.core.skills.Utterances
 
 /**
  * Picks what to tap on a YouTube Music search page. Pure so tests can feed
@@ -41,6 +42,30 @@ object YouTubeMusicResultPicker {
         "أغنية",
         "فيديو",
     )
+    private val queryStopwords = setOf(
+        "the",
+        "and",
+        "a",
+        "of",
+        "on",
+        "by",
+        "again",
+        "please",
+        "play",
+        "put",
+        "song",
+        "music",
+        "شغلي",
+        "شغل",
+        "حط",
+        "في",
+        "من",
+        "على",
+        "لو",
+        "سمحت",
+        "ممكن",
+    )
+    private const val MIN_TOKEN = 2
 
     fun bestPlayable(nodes: List<UiNode>): UiNode? {
         val usable = nodes
@@ -56,6 +81,42 @@ object YouTubeMusicResultPicker {
             .filter { (_, label) -> isResultRow(label) }
             .minByOrNull { (node, _) -> node.top }
             ?.first
+    }
+
+    /**
+     * True when the visible rows are (very likely) the new search's results:
+     * they carry a significant token from [query] (Arabic folding on both sides),
+     * or the rows changed from the snapshot taken before the search was opened.
+     * An empty [previous] snapshot proves nothing, so only the token rule applies.
+     */
+    fun readyFor(nodes: List<UiNode>, query: String, previous: List<UiNode>): Boolean {
+        val labels = resultLabels(nodes)
+        if (labels.isEmpty()) return false
+        if (carriesQueryToken(labels, query)) return true
+        if (previous.isEmpty()) return false
+        return resultLabels(previous) != labels
+    }
+
+    private fun carriesQueryToken(labels: List<String>, query: String): Boolean {
+        val token = significantTokens(query)
+            .maxByOrNull { it.length }
+            ?: return false
+        return labels.any { Utterances.normalize(it).contains(token) }
+    }
+
+    /** Query tokens worth matching on, normalized (أإآ→ا, ة→ه) and stopword-free. */
+    fun significantTokens(query: String): List<String> {
+        return Utterances.normalize(query)
+            .split(' ')
+            .filter { it.length >= MIN_TOKEN && it !in queryStopwords }
+    }
+
+    private fun resultLabels(nodes: List<UiNode>): List<String> {
+        return nodes
+            .filter { it.clickable && it.width > 0 && it.height > 0 }
+            .map { label(it) }
+            .filter { candidate -> candidate.isNotBlank() && candidate.lowercase() !in navAndChips }
+            .take(16)
     }
 
     private fun label(node: UiNode): String = node.desc.ifBlank { node.text }.trim()

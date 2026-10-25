@@ -112,6 +112,7 @@ class GeminiTextBrain(
                     text = text,
                     needsPermission = spoken.needsPermission,
                     search = spoken.search,
+                    toolRan = spoken.toolRan,
                 )
             }
         } catch (timeout: TimeoutCancellationException) {
@@ -271,6 +272,7 @@ class GeminiTextBrain(
         var response = generative.generateContent(history)
         val toolText = StringBuilder()
         var permission: String? = null
+        var toolRan = false
         var round = 0
         while (response.functionCalls.isNotEmpty() && round < MAX_TOOL_ROUNDS) {
             round++
@@ -282,6 +284,7 @@ class GeminiTextBrain(
                 val outcome = SkillTools.respond(registry, utterance, call)
                 Transcripts.append(toolText, outcome.spoken)
                 if (permission == null) permission = outcome.needsPermission
+                if (outcome.ran) toolRan = true
                 outcome.part
             }
             history += content("user") {
@@ -290,13 +293,14 @@ class GeminiTextBrain(
             response = generative.generateContent(history)
         }
         val text = response.text?.takeIf { it.isNotBlank() } ?: toolText.toString()
-        return Spoken(text, permission)
+        return Spoken(text, permission, toolRan = toolRan)
     }
 
     private data class Spoken(
         val text: String,
         val needsPermission: String?,
         val search: SearchDisplay? = null,
+        val toolRan: Boolean = false,
     )
 
     /** A child socket cancelled itself. This is not a cancelled question. */

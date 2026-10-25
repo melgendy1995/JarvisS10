@@ -32,6 +32,10 @@ class JarvisPromptTest {
         assertFalse(prompt.contains("*"))
         assertFalse(lower.contains("voice assistant on a phone"))
         assertFalse(lower.contains("only do"))
+        assertTrue(lower.contains("you cannot control the phone"))
+        assertTrue(lower.contains("never claim you stopped"))
+        assertTrue(lower.contains("try saying 'pause youtube music'"))
+        assertTrue(prompt.contains("وقف يوتيوب ميوزك"))
         assertTrue(prompt.length < PromptFitter.LIVE_CHAR_BUDGET / 2)
     }
 
