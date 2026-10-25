@@ -120,6 +120,11 @@ object GroqProtocol {
 
     /** Quota, plan, and permission failures stay distinct from a bad Worker bearer. */
     fun classifyBrowser(status: Int, body: String): GroqChatResult {
+        if (status in 200..299) {
+            val message = parseAssistant(body) ?: return GroqChatResult.Unavailable
+            if (message.content.isNullOrBlank()) return GroqChatResult.Unavailable
+            return GroqChatResult.Ok(message, parseTotalTokens(body))
+        }
         if (status == 401) return GroqChatResult.NotConfigured
         val text = body.lowercase()
         val localCap = text.contains("browser daily limit") || text.contains("proxy daily limit")
@@ -143,10 +148,7 @@ object GroqProtocol {
         if (quota && !plan) return GroqChatResult.SearchDenied("quota", localCap)
         if (plan) return GroqChatResult.SearchDenied("plan", localCap)
         if (permission) return GroqChatResult.SearchDenied("permission", localCap)
-        if (status !in 200..299) return GroqChatResult.Unavailable
-        val message = parseAssistant(body) ?: return GroqChatResult.Unavailable
-        if (message.content.isNullOrBlank()) return GroqChatResult.Unavailable
-        return GroqChatResult.Ok(message, parseTotalTokens(body))
+        return GroqChatResult.Unavailable
     }
 
     fun parseSearch(body: String): List<LiveHit> {

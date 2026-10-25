@@ -38,6 +38,9 @@ class GroqBrain(
     override val id: String = ID
     override val accent: BrainAccent = BrainAccent.GROQ
 
+    @Volatile
+    var browserEnabled: Boolean = true
+
     fun configured(): Boolean {
         return GroqProxy.normalize(proxyUrl()) != null && bearer().trim().isNotEmpty()
     }
@@ -59,7 +62,7 @@ class GroqBrain(
     private suspend fun replyFresh(request: BrainRequest): BrainResult {
         val gate = readiness()
         if (gate != null) return gate
-        val browsed = browse(request)
+        val browsed = if (browserEnabled) browse(request) else null
         if (browsed != null) return browsed
         val found = try {
             transport.search(request.utterance)

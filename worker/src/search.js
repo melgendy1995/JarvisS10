@@ -15,18 +15,18 @@ export function isWikiQuestion(text) {
   return false;
 }
 
-export function parseRss(xml, limit = 5) {
+export function parseRss(xml, limit = 5, defaultSource = "") {
   const items = [];
   const blocks = String(xml || "").match(/<item\b[^>]*>[\s\S]*?<\/item>/gi) || [];
   for (const block of blocks) {
     if (items.length >= limit) break;
     const rawTitle = textOf(block, "title");
     if (!rawTitle) continue;
-    const source = textOf(block, "source") || sourceFromTitle(rawTitle);
+    const source = textOf(block, "source") || sourceFromTitle(rawTitle) || defaultSource;
     const title = cleanTitle(rawTitle, source);
     items.push({
       title,
-      source,
+      source: source || defaultSource || "News",
       date: textOf(block, "pubDate"),
       link: textOf(block, "link"),
       kind: "news",
@@ -40,14 +40,18 @@ export async function gather(query, env, fetchImpl = fetch) {
   const q = String(query || "").trim().slice(0, 240);
   if (!q) return [];
   const arabic = /[\u0600-\u06FF]/.test(q);
-  const news = await newsItems(q, arabic, fetchImpl);
-  const extra = [];
-  if (isWikiQuestion(q)) {
-    const wiki = await wikiItem(q, arabic, fetchImpl);
-    if (wiki) extra.push(wiki);
+  const [news, wiki, web] = await Promise.all([
+    newsItems(q, arabic, fetchImpl),
+    isWikiQuestion(q) ? wikiItem(q, arabic, fetchImpl) : Promise.resolve(null),
+    premiumItems(q, env || {}, fetchImpl),
+  ]);
+  const extra = wiki ? [wiki] : [];
+  let combined = dedupe([...web, ...extra, ...news]);
+  if (!combined.length && !extra.length) {
+    const fallbackWiki = await wikiItem(q, arabic, fetchImpl);
+    if (fallbackWiki) combined = [fallbackWiki];
   }
-  const web = await premiumItems(q, env || {}, fetchImpl);
-  return dedupe([...web, ...extra, ...news]).slice(0, 8);
+  return combined.slice(0, 8);
 }
 
 function newsUrl(query, lang) {
@@ -56,28 +60,90 @@ function newsUrl(query, lang) {
   return `${NEWS}?q=${encodeURIComponent(query)}&hl=${hl}&gl=SA&ceid=${ceid}`;
 }
 
+const BROWSER_HEADERS = {
+  "user-agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "accept-language": "en-US,en;q=0.9,ar;q=0.8",
+  "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+  "sec-ch-ua-mobile": "?0",
+  "sec-ch-ua-platform": '"Windows"',
+  "sec-fetch-dest": "document",
+  "sec-fetch-mode": "navigate",
+  "sec-fetch-site": "none",
+  "sec-fetch-user": "?1",
+  "upgrade-insecure-requests": "1",
+};
+
+const FALLBACK_FEEDS = {
+  ar: [
+    { url: "https://feeds.bbci.co.uk/arabic/rss.xml", source: "BBC Arabic" },
+  ],
+  en: [
+    { url: "https://www.arabnews.com/rss.xml", source: "Arab News" },
+    { url: "https://feeds.bbci.co.uk/news/world/middle_east/rss.xml", source: "BBC News" },
+  ],
+};
+
 async function newsItems(query, arabic, fetchImpl) {
   const first = arabic ? "ar" : "en";
   const second = arabic ? "en" : "ar";
-  const primary = await rss(query, first, fetchImpl);
-  const secondary = await rss(query, second, fetchImpl);
+  const [primary, secondary] = await Promise.all([
+    rss(query, first, fetchImpl),
+    rss(query, second, fetchImpl),
+  ]);
   return dedupe([...primary, ...secondary]).slice(0, 5);
 }
 
 async function rss(query, lang, fetchImpl) {
   try {
     const response = await fetchImpl(newsUrl(query, lang), {
-      headers: {
-        accept: "application/rss+xml, application/xml, text/xml",
-        "user-agent": "JarvisS10/1.0 (news rss)",
-      },
-      signal: AbortSignal.timeout(8000),
+      headers: BROWSER_HEADERS,
+      signal: AbortSignal.timeout(6000),
     });
-    if (!response.ok) return [];
-    return parseRss(await response.text());
-  } catch {
-    return [];
+    if (response.ok) {
+      const xml = await response.text();
+      const items = parseRss(xml);
+      if (items.length) {
+        console.log(`[search] Google RSS success lang=${lang} count=${items.length}`);
+        return items;
+      }
+    } else {
+      console.warn(`[search] Google RSS status=${response.status} lang=${lang}`);
+    }
+  } catch (err) {
+    console.warn(`[search] Google RSS fetch failed lang=${lang}: ${err.message || err}`);
   }
+  return fallbackRss(query, lang, fetchImpl);
+}
+
+async function fallbackRss(query, lang, fetchImpl) {
+  const feeds = FALLBACK_FEEDS[lang] || FALLBACK_FEEDS.en;
+  for (const feed of feeds) {
+    try {
+      const response = await fetchImpl(feed.url, {
+        headers: {
+          accept: "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
+          "user-agent": BROWSER_HEADERS["user-agent"],
+        },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!response.ok) continue;
+      const xml = await response.text();
+      const items = parseRss(xml, 10, feed.source);
+      if (!items.length) continue;
+      const words = query.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+      const matches = items.filter((it) => {
+        const text = (it.title + " " + it.extract).toLowerCase();
+        return words.some((w) => text.includes(w));
+      });
+      console.log(`[search] Fallback RSS ${feed.source} count=${items.length} matches=${matches.length}`);
+      return matches.length ? matches.slice(0, 5) : items.slice(0, 5);
+    } catch (err) {
+      console.warn(`[search] Fallback RSS ${feed.source} failed: ${err.message || err}`);
+    }
+  }
+  return [];
 }
 
 async function wikiItem(query, arabic, fetchImpl) {
@@ -91,7 +157,7 @@ async function wikiItem(query, arabic, fetchImpl) {
     search.searchParams.set("format", "json");
     search.searchParams.set("srlimit", "1");
     const found = await fetchImpl(search.toString(), {
-      headers: { accept: "application/json", "user-agent": "JarvisS10/1.0 (wikipedia)" },
+      headers: { accept: "application/json", "user-agent": "JarvisS10/1.0 (https://github.com/jarvis; contact@jarvis.local)" },
       signal: AbortSignal.timeout(8000),
     });
     if (!found.ok) return null;
@@ -100,7 +166,7 @@ async function wikiItem(query, arabic, fetchImpl) {
     if (!title) return null;
     const summaryUrl = `https://${host}/api/rest_v1/page/summary/${encodeURIComponent(title)}`;
     const summary = await fetchImpl(summaryUrl, {
-      headers: { accept: "application/json", "user-agent": "JarvisS10/1.0 (wikipedia)" },
+      headers: { accept: "application/json", "user-agent": "JarvisS10/1.0 (https://github.com/jarvis; contact@jarvis.local)" },
       signal: AbortSignal.timeout(8000),
     });
     if (!summary.ok) return null;

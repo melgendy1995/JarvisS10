@@ -109,6 +109,12 @@ class JarvisApplication : Application() {
         job.join()
     }
 
+    fun setGroqBrowserEnabled(enabled: Boolean) {
+        if (::groqBrain.isInitialized) {
+            groqBrain.browserEnabled = enabled
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         timers = AppTimerScheduler(this, announcements)

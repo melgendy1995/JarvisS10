@@ -62,6 +62,7 @@ class DebugAskReceiver : BroadcastReceiver() {
         if (intent.action != ACTION) return
         val question = intent.getStringExtra("q")?.trim().orEmpty()
         val gemini = intent.getBooleanExtra("gemini", true)
+        val browser = intent.getBooleanExtra("browser", true)
         if (question.isEmpty()) {
             Log.w(TAG, "missing q")
             return
@@ -80,10 +81,11 @@ class DebugAskReceiver : BroadcastReceiver() {
         askScope.launch {
             val previous = GeminiDebug.enabled
             GeminiDebug.enabled = gemini
+            app.setGroqBrowserEnabled(browser)
             try {
-                Log.i(TAG, "ask gemini=$gemini via voice loop")
+                Log.i(TAG, "ask gemini=$gemini browser=$browser via voice loop")
                 app.runVoiceUtterance(question)
-                Log.i(TAG, "ask finished gemini=$gemini")
+                Log.i(TAG, "ask finished gemini=$gemini browser=$browser")
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 val where = cancelled.stackTrace.take(6).joinToString(" | ") {
                     "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}"
@@ -94,6 +96,7 @@ class DebugAskReceiver : BroadcastReceiver() {
                 Log.w(TAG, "debug ask failed", error)
             } finally {
                 GeminiDebug.enabled = previous
+                app.setGroqBrowserEnabled(true)
                 inFlight.set(false)
                 pending.finish()
             }

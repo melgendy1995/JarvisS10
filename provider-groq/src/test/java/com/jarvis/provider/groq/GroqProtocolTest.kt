@@ -95,6 +95,13 @@ class GroqProtocolTest {
         ) as GroqChatResult.SearchDenied
         assertEquals("permission", permission.reason)
 
+        val okWithPlan = GroqProtocol.classifyBrowser(
+            200,
+            """{"choices":[{"message":{"role":"assistant","content":"Saudi Arabia announced an economic plan for 2030."}}],"usage":{"total_tokens":55}}""",
+        ) as GroqChatResult.Ok
+        assertEquals("Saudi Arabia announced an economic plan for 2030.", okWithPlan.message.content)
+        assertEquals(55, okWithPlan.totalTokens)
+
         val hits = GroqProtocol.parseSearch(
             """{"items":[{"title":"Cabinet","source":"Arab News","date":"24 Oct 2026","link":"https://arabnews.com/a","kind":"news","extract":"Met today"}]}""",
         )
