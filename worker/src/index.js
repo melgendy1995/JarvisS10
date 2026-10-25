@@ -98,9 +98,11 @@ async function handleSearch(bytes, env) {
 
 function multipartModel(bytes) {
   const head = new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(0, 4096));
-  const match = head.match(/name="model"\r?\n\r?\n([^\r\n]+)/);
+  const match = head.match(/name="model"\r?\n(?:[^\r\n]+\r?\n)*?\r?\n([^\r\n]+)/);
   return match ? match[1].trim() : "";
 }
+
+export { multipartModel };
 
 function secondsUntilUtcMidnight() {
   const now = new Date();

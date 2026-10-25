@@ -9,11 +9,14 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
 
 interface GroqTransport {
     suspend fun complete(request: GroqChatRequest): GroqChatResult
@@ -85,13 +88,7 @@ internal class OkHttpGroqTransport(
 
     override suspend fun transcribe(wav: ByteArray): GroqTranscript {
         val endpoint = endpoint("/audio/transcriptions") ?: return GroqTranscript.Failed
-        // Model field first so a proxy can read the id without scanning the WAV bytes.
-        val multipart = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart("model", GroqModels.WHISPER)
-            .addFormDataPart("response_format", "json")
-            .addFormDataPart("file", "utterance.wav", wav.toRequestBody(WAV))
-            .build()
+        val multipart = transcriptionMultipart(wav)
         val http = Request.Builder()
             .url(endpoint)
             .header("Authorization", "Bearer ${bearer().trim()}")
@@ -156,9 +153,32 @@ internal class OkHttpGroqTransport(
         }
     }
 
-    private companion object {
+    internal companion object {
         const val TAG = "JarvisGroq"
         val JSON = "application/json; charset=utf-8".toMediaType()
         val WAV = "audio/wav".toMediaType()
+
+        fun transcriptionMultipart(wav: ByteArray): MultipartBody {
+            return MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addPart(simpleFormPart("model", GroqModels.WHISPER))
+                .addPart(simpleFormPart("response_format", "json"))
+                .addFormDataPart("file", "utterance.wav", wav.toRequestBody(WAV))
+                .build()
+        }
+
+        private fun simpleFormPart(name: String, value: String): MultipartBody.Part {
+            return MultipartBody.Part.createFormData(
+                name,
+                null,
+                object : RequestBody() {
+                    override fun contentType(): MediaType? = null
+                    override fun contentLength(): Long = -1L
+                    override fun writeTo(sink: BufferedSink) {
+                        sink.writeUtf8(value)
+                    }
+                },
+            )
+        }
     }
 }
