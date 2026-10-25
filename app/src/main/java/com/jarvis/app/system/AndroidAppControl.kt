@@ -33,10 +33,14 @@ class AndroidAppControl(context: Context) : AppControl {
     private val packages = appContext.packageManager
     private val playback = PlaybackMonitor(appContext, onPlaybackStopped = { pkg ->
         Log.i(TAG, "auto-return after $pkg stopped")
-        KioskGate.returnToJarvis(appContext)
+        KioskGate.returnToJarvis(appContext, "playback-stopped")
     })
 
+    /** Package the current action launched, if any. Drives the return to Jarvis. */
+    private var launchedPackage: String? = null
+
     init {
+        playback.sessionPaused = { pkg -> sessionState(pkg) == PlaybackState.STATE_PAUSED }
         playback.start()
     }
 
@@ -49,9 +53,10 @@ class AndroidAppControl(context: Context) : AppControl {
                 "media=${slots["media"].orEmpty()} volume=${slots["volume"].orEmpty()}",
         )
         playback.setBusy(true)
+        launchedPackage = null
         return try {
             withContext(Dispatchers.Main) {
-                when (action) {
+                val result = when (action) {
                     AppControlPhrases.OPEN -> open(slots)
                     AppControlPhrases.PLAY -> play(slots)
                     AppControlPhrases.MEDIA -> media(slots)
@@ -60,6 +65,8 @@ class AndroidAppControl(context: Context) : AppControl {
                     AppControlPhrases.RETURN -> goBack(slots)
                     else -> SkillResult("I didn't catch that.", success = false)
                 }
+                finishInFront(action, result, slots)
+                result
             }
         } finally {
             playback.setBusy(false)
@@ -98,7 +105,7 @@ class AndroidAppControl(context: Context) : AppControl {
                 return playOnYouTubeMusic(query, arabic, directStarted)
             }
             if (directStarted) {
-                playback.keepPlaying(named)
+                playback.keepPlaying(named) { sessionPlay(named) }
                 return SkillResult(if (arabic) "شغال." else "Playing.")
             }
             return SkillResult(
@@ -109,13 +116,13 @@ class AndroidAppControl(context: Context) : AppControl {
         if (target.isEmpty()) {
             val player = defaultDirectPlayer()
             if (player != null && directPlay(player, query)) {
-                playback.keepPlaying(player)
+                playback.keepPlaying(player) { sessionPlay(player) }
                 return SkillResult(if (arabic) "شغال." else "Playing.")
             }
         }
         if ((target.isEmpty() || target == AppControlPhrases.TARGET_YOUTUBE) && youtubeInstalled()) {
             if (!playback.isStarted(AppMatcher.YOUTUBE) && directPlay(AppMatcher.YOUTUBE, query)) {
-                playback.keepPlaying(AppMatcher.YOUTUBE)
+                playback.keepPlaying(AppMatcher.YOUTUBE) { sessionPlay(AppMatcher.YOUTUBE) }
                 return SkillResult(if (arabic) "شغال على يوتيوب." else "Playing on YouTube.")
             }
             return playOnYouTube(query, arabic)
@@ -149,7 +156,7 @@ class AndroidAppControl(context: Context) : AppControl {
         }
         val outcome = YouTubeMusicRouting.outcome(directStarted, tapStarted, youtubeAvailable, youtubeStarted)
         if (outcome == MusicPlayOutcome.PLAYING_ON_YT_MUSIC) {
-            playback.keepPlaying(AppMatcher.YOUTUBE_MUSIC)
+            playback.keepPlaying(AppMatcher.YOUTUBE_MUSIC) { sessionPlay(AppMatcher.YOUTUBE_MUSIC) }
         }
         return SkillResult(YouTubeMusicRouting.message(outcome, arabic), success = outcome != MusicPlayOutcome.FAILED)
     }
@@ -261,7 +268,7 @@ class AndroidAppControl(context: Context) : AppControl {
                 success = false,
             )
         }
-        playback.keepPlaying(AppMatcher.YOUTUBE)
+        playback.keepPlaying(AppMatcher.YOUTUBE) { sessionPlay(AppMatcher.YOUTUBE) }
         return SkillResult(if (arabic) "شغال على يوتيوب." else "Playing on YouTube.")
     }
 
@@ -377,9 +384,45 @@ class AndroidAppControl(context: Context) : AppControl {
 
     private suspend fun directPlay(packageName: String, query: String): Boolean {
         if (!playback.isStarted(packageName)) {
+            val before = trackKey(packageName)
             if (!sendPlayFromSearch(packageName, query)) return false
-            if (awaitStarted(packageName, 2_500)) return true
+            if (awaitStarted(packageName, 2_500)) return awaitNewTrack(packageName, query, before)
         }
+        return false
+    }
+
+    /** Title|artist of the session's current item, or null when it is not playing. */
+    private fun trackKey(pkg: String): String? {
+        val controller = activeController(pkg) ?: return null
+        if (controller.playbackState?.state != PlaybackState.STATE_PLAYING) return null
+        val meta = controller.metadata ?: return null
+        return "${meta.getString(android.media.MediaMetadata.METADATA_KEY_TITLE)}|" +
+            "${meta.getString(android.media.MediaMetadata.METADATA_KEY_ARTIST)}"
+    }
+
+    /**
+     * Audio that was already playing is not proof the search took. Accept only a playing
+     * item that matches the query or differs from the one playing before the request.
+     */
+    private suspend fun awaitNewTrack(pkg: String, query: String, before: String?): Boolean {
+        repeat(12) {
+            val controller = activeController(pkg)
+            if (controller?.playbackState?.state == PlaybackState.STATE_PLAYING) {
+                val meta = controller.metadata
+                val title = meta?.getString(android.media.MediaMetadata.METADATA_KEY_TITLE)
+                val artist = meta?.getString(android.media.MediaMetadata.METADATA_KEY_ARTIST)
+                val album = meta?.getString(android.media.MediaMetadata.METADATA_KEY_ALBUM)
+                val key = if (meta == null) null else "$title|$artist"
+                if (ForegroundReturn.metadataMatches(query, title, artist, album) ||
+                    (key != null && key != before)
+                ) {
+                    Log.i(TAG, "direct play took pkg=$pkg title=\"$title\"")
+                    return true
+                }
+            }
+            delay(250)
+        }
+        Log.i(TAG, "direct play not taken pkg=$pkg (same item still playing)")
         return false
     }
 
@@ -426,13 +469,21 @@ class AndroidAppControl(context: Context) : AppControl {
             "resume" -> !played
             else -> false
         }
-        if (youtube != null && which != "previous" && tapNeeded) {
+        // UI taps only while the player itself is in front; with Jarvis in front the
+        // session/media-key result stands and no app is opened.
+        if (youtube != null && which != "previous" && tapNeeded && !KioskGate.jarvisResumed) {
             val action = if (which == "resume") "play" else which
             youtube.tapControl(action)
             delay(500)
         }
         if (which == "pause" && played) {
             return SkillResult(if (arabic) "ما قدرت أوقفه." else "I couldn't pause it.", success = false)
+        }
+        if ((which == "resume" || which == "next" || which == "previous") && pkg != "none" && played) {
+            // The spoken reply takes transient focus and the player only resumes on its
+            // own window focus; re-send play through the session for a few seconds.
+            val sessionPkg = pkg
+            playback.keepPlaying(sessionPkg, 8_000) { sessionPlay(sessionPkg) }
         }
         val decision = MediaFeedback.decide(
             which = which,
@@ -500,6 +551,71 @@ class AndroidAppControl(context: Context) : AppControl {
         return manager.getActiveSessions(listener).first { it.packageName == packageName }
     }
 
+    /**
+     * Generic return-to-Jarvis for skills that opened another app. Waits for confirmed
+     * playback (session PLAYING, metadata matching when it can) or the timeout, then
+     * reorders Jarvis forward. The spoken reply is said after this, with Jarvis in front.
+     */
+    private suspend fun finishInFront(action: String, result: SkillResult, slots: Map<String, String>) {
+        val pkg = launchedPackage ?: return
+        if (!ForegroundReturn.wantsReturn(action, pkg, KioskGate.jarvisResumed)) return
+        if (result.success) awaitConfirmedPlayback(pkg, slots["query"].orEmpty())
+        if (!KioskGate.returnToJarvis(appContext, "after-$action")) return
+        var waited = 0
+        while (!KioskGate.jarvisResumed && waited < 3_000) {
+            delay(100)
+            waited += 100
+        }
+        Log.i(TAG, "foreground return pkg=$pkg resumed=${KioskGate.jarvisResumed} waited=${waited}ms")
+        if (!result.success) return
+        delay(800)
+        val state = sessionState(pkg)
+        Log.i(TAG, "foreground return playback pkg=$pkg state=$state")
+        if (state != null && state != PlaybackState.STATE_PLAYING && state != PlaybackState.STATE_BUFFERING) {
+            // Backgrounding paused it: resume once through the session, never by reopening the app.
+            if (!sessionPlay(pkg)) playback.dispatch(KeyEvent.KEYCODE_MEDIA_PLAY)
+            Log.i(TAG, "foreground return resumed playback via session")
+        }
+    }
+
+    private suspend fun awaitConfirmedPlayback(pkg: String, query: String): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + ForegroundReturn.PLAY_CONFIRM_TIMEOUT_MS
+        var playingSeen = false
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val controller = activeController(pkg)
+            val state = controller?.playbackState?.state
+            if (state == PlaybackState.STATE_PLAYING) {
+                playingSeen = true
+                val meta = controller.metadata
+                val title = meta?.getString(android.media.MediaMetadata.METADATA_KEY_TITLE)
+                val artist = meta?.getString(android.media.MediaMetadata.METADATA_KEY_ARTIST)
+                val album = meta?.getString(android.media.MediaMetadata.METADATA_KEY_ALBUM)
+                if (query.isBlank() || ForegroundReturn.metadataMatches(query, title, artist, album)) {
+                    Log.i(TAG, "playback confirmed pkg=$pkg title=\"$title\" artist=\"$artist\"")
+                    return true
+                }
+            }
+            delay(250)
+        }
+        Log.i(TAG, "playback confirm timeout pkg=$pkg playingSeen=$playingSeen")
+        return false
+    }
+
+    private fun sessionPlay(pkg: String): Boolean {
+        val controller = activeController(pkg) ?: return false
+        return runCatching { controller.transportControls.play() }.isSuccess
+    }
+
+    private fun activeController(pkg: String): MediaController? {
+        val manager = appContext.getSystemService(MediaSessionManager::class.java)
+        val listener = ComponentName(appContext, JarvisMediaListener::class.java)
+        return try {
+            manager.getActiveSessions(listener).firstOrNull { it.packageName == pkg }
+        } catch (_: SecurityException) {
+            null
+        }
+    }
+
     private fun volume(slots: Map<String, String>): SkillResult {
         val arabic = slots["lang"] == "ar"
         return when (slots["volume"]) {
@@ -562,12 +678,14 @@ class AndroidAppControl(context: Context) : AppControl {
     private suspend fun goBack(slots: Map<String, String>): SkillResult {
         val arabic = slots["lang"] == "ar"
         if (anyWatchedStarted()) {
-            playback.dispatch(KeyEvent.KEYCODE_MEDIA_PAUSE)
+            val playing = sessionControls().firstOrNull { it.session.state == PlaybackState.STATE_PLAYING }
+            val paused = playing != null && runCatching { playing.controller.transportControls.pause() }.isSuccess
+            if (!paused) playback.dispatch(KeyEvent.KEYCODE_MEDIA_PAUSE)
             delay(500)
         }
         playback.cancelKeep()
         playback.disarm()
-        KioskGate.returnToJarvis(appContext)
+        KioskGate.returnToJarvis(appContext, "user-back")
         return SkillResult(if (arabic) "رجعت." else "Back.")
     }
 
@@ -609,6 +727,7 @@ class AndroidAppControl(context: Context) : AppControl {
         KioskGate.prepareToLeave(appContext, packageName)
         ListenForegroundService.startWhileVisible(appContext)
         playback.arm(packageName)
+        launchedPackage = packageName
         return try {
             appContext.startActivity(intent)
             Log.i(TAG, "package launched $packageName ${intent.action}")

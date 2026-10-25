@@ -34,6 +34,9 @@ class PlaybackMonitor(
     private val unparsed = HashSet<String>()
     private var lastAnon = ""
 
+    /** Set by the owner: true when the package's media session reports PAUSED. */
+    var sessionPaused: ((String) -> Boolean)? = null
+
     private val callback = object : AudioManager.AudioPlaybackCallback() {
         override fun onPlaybackConfigChanged(configs: MutableList<AudioPlaybackConfiguration>) {
             consider(configs)
@@ -73,18 +76,29 @@ class PlaybackMonitor(
     }
 
     /** Re-sends play if speech focus paused a video we just started. */
-    fun keepPlaying(packageName: String, windowMs: Long = 12_000) {
+    fun keepPlaying(packageName: String, windowMs: Long = 12_000, resume: (() -> Boolean)? = null) {
         val token = ++keepGeneration
         val until = SystemClock.elapsedRealtime() + windowMs
         fun tick() {
             if (token != keepGeneration || SystemClock.elapsedRealtime() > until) return
-            if (isPaused(packageName) && !isStarted(packageName)) {
-                Log.i(TAG, "media key play after focus loss package=$packageName")
-                dispatch(KeyEvent.KEYCODE_MEDIA_PLAY)
+            // With a session check, a paused session counts even when its AudioTrack is gone.
+            val pausedNow = resume?.let { sessionPaused?.invoke(packageName) } ?: (isPaused(packageName) && !isStarted(packageName))
+            if (pausedNow && !assistantSpeaking()) {
+                // The player may wait for its own window focus before resuming, which
+                // never comes while Jarvis is in front, so ask its session to play.
+                val viaSession = resume?.invoke() == true
+                Log.i(TAG, "play after focus loss package=$packageName via=${if (viaSession) "session" else "key"}")
+                if (!viaSession) dispatch(KeyEvent.KEYCODE_MEDIA_PLAY)
             }
             handler.postDelayed({ tick() }, 600)
         }
         handler.postDelayed({ tick() }, 600)
+    }
+
+    /** Jarvis's own TTS plays as USAGE_ASSISTANT; resuming music mid-sentence would cut it off. */
+    private fun assistantSpeaking(): Boolean = audio.activePlaybackConfigurations.any { config ->
+        config.audioAttributes.usage == AudioAttributes.USAGE_ASSISTANT &&
+            STATE.find(config.toString())?.groupValues?.get(1) == STATE_STARTED
     }
 
     fun cancelKeep() {

@@ -50,7 +50,13 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         hideSystemBars()
+        KioskGate.setResumed(true)
         KioskGate.onJarvisVisible()
+    }
+
+    override fun onPause() {
+        KioskGate.setResumed(false)
+        super.onPause()
     }
 
     override fun onStop() {
@@ -60,7 +66,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) hideSystemBars()
+        if (hasFocus) {
+            hideSystemBars()
+            KioskGate.onJarvisFocused()
+        }
     }
 
     private fun hideSystemBars() {
