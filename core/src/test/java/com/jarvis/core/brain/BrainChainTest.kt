@@ -160,6 +160,80 @@ class BrainChainTest {
     }
 
     @Test
+    fun staleAnswerTriggersOneForcedSearchRetry() = runBlocking {
+        val stale = fake("gemini-text") { request ->
+            if (request.forceLiveSearch) {
+                BrainResult.Failure("gemini-text", BrainError.Unavailable)
+            }
+            BrainResult.Answer(
+                "gemini-text",
+                BrainAccent.GEMINI,
+                "I don't have access to real-time information.",
+            )
+        }
+        val groq = fake("groq") { request ->
+            assertTrue(request.forceLiveSearch)
+            BrainResult.Answer("groq", BrainAccent.GROQ, "Saudi Arabia won 3-1.")
+        }
+        val result = BrainChain(router, listOf(stale, groq)).reply(BrainRequest("who won the match"))
+        assertEquals("Saudi Arabia won 3-1.", (result as BrainResult.Answer).text)
+        assertEquals(1, stale.calls)
+        assertEquals(1, groq.calls)
+    }
+
+    @Test
+    fun groundedOrPlainAnswersDoNotRetry() = runBlocking {
+        val live = fake("gemini-live") {
+            BrainResult.Answer("gemini-live", BrainAccent.GEMINI, "Live answer.", search = null)
+        }
+        val groq = fake("groq") { error("groq should not run") }
+        val plain = BrainChain(router, listOf(live, groq)).reply(BrainRequest("tell me a joke"))
+        assertEquals("Live answer.", (plain as BrainResult.Answer).text)
+        assertEquals(1, live.calls)
+        assertEquals(0, groq.calls)
+    }
+
+    @Test
+    fun failedRetryKeepsTheFirstAnswer() = runBlocking {
+        val stale = fake("gemini-text") {
+            BrainResult.Answer(
+                "gemini-text",
+                BrainAccent.GEMINI,
+                "I do not have access to live data.",
+            )
+        }
+        val groq = fake("groq") { BrainResult.Failure("groq", BrainError.Unavailable) }
+        val result = BrainChain(router, listOf(stale, groq)).reply(BrainRequest("who won the match"))
+        assertEquals(
+            "I do not have access to live data.",
+            (result as BrainResult.Answer).text,
+        )
+        assertEquals(1, stale.calls)
+        assertEquals(1, groq.calls)
+    }
+
+    @Test
+    fun retryFallsThroughBrainsInTheSecondPass() = runBlocking {
+        val stale = fake("gemini-text") { request ->
+            if (request.forceLiveSearch) {
+                BrainResult.Failure("gemini-text", BrainError.NotConfigured)
+            } else {
+                BrainResult.Answer(
+                    "gemini-text",
+                    BrainAccent.GEMINI,
+                    "As of my last knowledge, nothing.",
+                )
+            }
+        }
+        val groq = fake("groq") { request ->
+            assertTrue(request.forceLiveSearch)
+            BrainResult.Answer("groq", BrainAccent.GROQ, "From search.")
+        }
+        val result = BrainChain(router, listOf(stale, groq)).reply(BrainRequest("who won the match"))
+        assertEquals("From search.", (result as BrainResult.Answer).text)
+    }
+
+    @Test
     fun parentCancelSkipsTheRestOfTheChain() = runBlocking {
         val started = CompletableDeferred<Unit>()
         val live = fake("gemini-live") {

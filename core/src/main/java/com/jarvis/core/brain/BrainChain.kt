@@ -38,7 +38,42 @@ class BrainChain(
             )
         }
         var last: BrainError = BrainError.NotConfigured
+        val answer = runBrains(request, skip = null) { last = it }
+        // One retry, never a loop: a memory-only answer for a live question gets
+        // a second pass with search forced, skipping the brain that lied stale.
+        // Kept only when it answers.
+        if (
+            answer is BrainResult.Answer &&
+            answer.search == null &&
+            StaleAnswer.needsLiveRetry(answer.text)
+        ) {
+            log("stale-answer retry forced=live-search")
+            val retried = runBrains(request.copy(forceLiveSearch = true), skip = answer.brainId) { last = it }
+            if (retried is BrainResult.Answer) return logAnswer(retried, started)
+        }
+        if (answer is BrainResult.Answer) return logAnswer(answer, started)
+        return logOffline(last, started)
+    }
+
+    private fun logAnswer(answer: BrainResult.Answer, started: Long): BrainResult.Answer {
+        logStep(answer.brainId, "answer", started)
+        return answer
+    }
+
+    private fun logOffline(last: BrainError, started: Long): BrainResult.Failure {
+        val offline = exhausted(last)
+        log("brain=$OFFLINE_ID outcome=failure:${last.javaClass.simpleName} elapsedMs=0")
+        return offline
+    }
+
+    private suspend fun runBrains(
+        request: BrainRequest,
+        skip: String?,
+        onError: (BrainError) -> Unit,
+    ): BrainResult {
+        var last: BrainError = BrainError.NotConfigured
         for (brain in brains) {
+            if (brain.id == skip) continue
             val step = System.nanoTime()
             val result = try {
                 supervisorScope {
@@ -67,9 +102,8 @@ class BrainChain(
                 is BrainResult.Failure -> last = result.error
             }
         }
-        val offline = exhausted(last)
-        log("brain=$OFFLINE_ID outcome=failure:${last.javaClass.simpleName} elapsedMs=0")
-        return offline
+        onError(last)
+        return exhausted(last)
     }
 
     private fun logStep(brainId: String, outcome: String, startedNs: Long) {

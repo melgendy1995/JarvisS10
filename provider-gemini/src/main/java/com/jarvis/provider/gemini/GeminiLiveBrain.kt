@@ -14,6 +14,7 @@ import com.google.firebase.ai.type.SessionResumptionConfig
 import com.google.firebase.ai.type.asInlineDataPartOrNull
 import com.google.firebase.ai.type.asTextOrNull
 import com.jarvis.core.JarvisLog
+import com.jarvis.core.brain.AnswerLanguage
 import com.jarvis.core.brain.Brain
 import com.jarvis.core.brain.BrainAccent
 import com.jarvis.core.brain.BrainError
@@ -84,7 +85,10 @@ class GeminiLiveBrain(
             time = time,
             liveCapReached = usage.liveCapReached(),
         )?.let { return it }
-        if (Freshness.needsLiveInfo(request.utterance) && !usage.groundedCapReached()) {
+        if (
+            (request.forceLiveSearch || Freshness.needsLiveInfo(request.utterance)) &&
+            !usage.groundedCapReached()
+        ) {
             JarvisLog.i("JarvisSearch", "skip live; text grounding model=${ModelConfig.GROUNDING_MODEL}")
             return BrainResult.Failure(id, BrainError.Unavailable)
         }
@@ -128,7 +132,7 @@ class GeminiLiveBrain(
             summary = request.summary,
             priorTurns = request.turns,
             charBudget = PromptFitter.LIVE_CHAR_BUDGET,
-        )
+        ) + "\n" + AnswerLanguage.instruction(request.utterance)
         val session = GeminiLiveSession(scope, registry, time, usage, system, modelName)
         openSession = session
         return try {

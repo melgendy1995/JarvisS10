@@ -3,6 +3,7 @@ package com.jarvis.provider.gemini
 import com.google.firebase.ai.type.Content
 import com.google.firebase.ai.type.content
 import com.jarvis.core.JarvisLog
+import com.jarvis.core.brain.AnswerLanguage
 import com.jarvis.core.brain.Brain
 import com.jarvis.core.brain.BrainAccent
 import com.jarvis.core.brain.BrainError
@@ -35,7 +36,7 @@ class GeminiTextBrain(
 
     override suspend fun reply(request: BrainRequest): BrainResult {
         gate(id, configured, online, cooldown, time)?.let { return it }
-        if (Freshness.needsLiveInfo(request.utterance)) {
+        if (request.forceLiveSearch || Freshness.needsLiveInfo(request.utterance)) {
             if (usage.tryAcquireGrounded()) {
                 return completeGrounded(request)
             }
@@ -222,7 +223,8 @@ class GeminiTextBrain(
             charBudget = PromptFitter.GEMINI_SYSTEM_CHARS,
         )
         val fitted = fitter.fit(assembled, request.turns, request.utterance)
-        val system = fitted.system.ifBlank { ModelConfig.SYSTEM_PROMPT } + "\n" + GROUNDING_NOTE
+        val system = fitted.system.ifBlank { ModelConfig.SYSTEM_PROMPT } + "\n" + GROUNDING_NOTE +
+            "\n" + AnswerLanguage.instruction(request.utterance)
         val generative = GeminiModels.grounded(system, model)
         val history = mutableListOf<Content>()
         for (turn in fitted.turns) {
@@ -251,9 +253,11 @@ class GeminiTextBrain(
             charBudget = PromptFitter.GEMINI_SYSTEM_CHARS,
         )
         val fitted = fitter.fit(assembled, request.turns, request.utterance)
+        val system = fitted.system.ifBlank { ModelConfig.SYSTEM_PROMPT } +
+            "\n" + AnswerLanguage.instruction(request.utterance)
         val generative = GeminiModels.text(
             registry,
-            fitted.system.ifBlank { ModelConfig.SYSTEM_PROMPT },
+            system,
             model,
         )
         val history = mutableListOf<Content>()

@@ -39,6 +39,8 @@ data class BrainRequest(
     val facts: List<MemoryFact> = emptyList(),
     /** Rolling summary of turns that fell out of the recent window. */
     val summary: String = "",
+    /** Set by the chain's single retry when the first answer admitted no live data. */
+    val forceLiveSearch: Boolean = false,
 )
 
 /**

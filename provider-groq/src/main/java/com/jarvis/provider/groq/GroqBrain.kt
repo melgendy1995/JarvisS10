@@ -1,6 +1,7 @@
 package com.jarvis.provider.groq
 
 import com.jarvis.core.JarvisLog
+import com.jarvis.core.brain.AnswerLanguage
 import com.jarvis.core.brain.Brain
 import com.jarvis.core.brain.BrainAccent
 import com.jarvis.core.brain.BrainError
@@ -49,7 +50,7 @@ class GroqBrain(
     fun hasCapacity(): Boolean = configured() && rotation.hasAvailableModel()
 
     override suspend fun reply(request: BrainRequest): BrainResult {
-        if (Freshness.needsLiveInfo(request.utterance)) {
+        if (request.forceLiveSearch || Freshness.needsLiveInfo(request.utterance)) {
             return replyFresh(request)
         }
         return replyChat(request)
@@ -156,7 +157,10 @@ class GroqBrain(
                     GroqChatRequest(
                         model = model,
                         messages = listOf(
-                            OutgoingMessage(role = "system", content = PHRASE_SYSTEM),
+                            OutgoingMessage(
+                                role = "system",
+                                content = PHRASE_SYSTEM + " " + AnswerLanguage.instruction(request.utterance),
+                            ),
                             OutgoingMessage(role = "user", content = prompt),
                         ),
                         tools = emptyList(),
@@ -244,7 +248,10 @@ class GroqBrain(
         return GroqChatRequest(
             model = model,
             messages = listOf(
-                OutgoingMessage(role = "system", content = BROWSER_SYSTEM),
+                OutgoingMessage(
+                    role = "system",
+                    content = BROWSER_SYSTEM + " " + AnswerLanguage.instruction(request.utterance),
+                ),
                 OutgoingMessage(role = "user", content = request.utterance),
             ),
             tools = emptyList(),
@@ -485,7 +492,7 @@ class GroqBrain(
             facts = request.facts,
             summary = request.summary,
             charBudget = PromptFitter.GROQ_SYSTEM_CHARS,
-        )
+        ) + "\n" + AnswerLanguage.instruction(request.utterance)
     }
 
     private fun cooldownUntil(limited: Turn.Limited): Instant {
