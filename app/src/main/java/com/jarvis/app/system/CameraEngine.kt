@@ -42,7 +42,7 @@ internal class CameraEngine(
     private val owner = CameraLifecycle()
     private var provider: ProcessCameraProvider? = null
     private var profile: CameraProfile? = null
-    private var front = false
+    private var front = true
     private var surfaceProvider: Preview.SurfaceProvider? = null
     private val thermalLabel = AtomicInteger(0)
 

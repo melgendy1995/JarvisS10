@@ -247,5 +247,6 @@ object AppControlPhrases {
     private val OPEN_AR = Regex(
         """^(?:من فضلك\s+)?(?:افتح|فتح)\s+(?:تطبيق\s+)?(.+)$""",
     )
-    private val EXCLUDED_OPEN = Regex("""(?:timer|countdown|موقت|تايمر|flashlight|torch|كشاف|فلاش)""")
+    // Camera phrases belong to CameraSkill, never to launching com.sec.android.app.camera.
+    private val EXCLUDED_OPEN = Regex("""(?:timer|countdown|موقت|تايمر|flashlight|torch|كشاف|فلاش|camera|كاميرا)""")
 }

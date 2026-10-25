@@ -1,5 +1,6 @@
 package com.jarvis.core.skills
 
+import com.jarvis.core.CommandRouter
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -38,13 +39,106 @@ class CameraSkillTest {
     }
 
     @Test
+    fun openAndShowPhrasesStartTheStream() {
+        for (phrase in listOf(
+            "open camera",
+            "open the camera",
+            "open the front camera",
+            "open front camera",
+            "open the back camera",
+            "show camera",
+            "show the camera",
+            "show me the camera",
+            "start camera",
+            "start the camera",
+            "start front camera",
+            "turn on the rear camera",
+            "turn on the front camera",
+        )) {
+            val call = skill.match(phrase)
+            assertEquals(phrase, "on", call?.slots?.get("action"))
+        }
+    }
+
+    @Test
+    fun arabicOpenAndLensPhrasesStartTheStream() {
+        for (phrase in listOf(
+            "افتح الكاميرا",
+            "شغل الكاميرا",
+            "افتح الكاميرا الأمامية",
+            "شغل الكاميرا الخلفية",
+            "شغل الكاميرا الامامية",
+        )) {
+            val call = skill.match(phrase)
+            assertEquals(phrase, "on", call?.slots?.get("action"))
+        }
+    }
+
+    @Test
+    fun lensDefaultsToFront() {
+        assertEquals("front", skill.match("open camera")?.slots?.get("lens"))
+        assertEquals("front", skill.match("camera on")?.slots?.get("lens"))
+        assertEquals("front", skill.match("افتح الكاميرا")?.slots?.get("lens"))
+        assertEquals("front", skill.match("turn the camera on")?.slots?.get("lens"))
+    }
+
+    @Test
+    fun lensParsesFrontAndBack() {
+        assertEquals("front", skill.match("open front camera")?.slots?.get("lens"))
+        assertEquals("front", skill.match("turn on the front camera")?.slots?.get("lens"))
+        assertEquals("front", skill.match("افتح الكاميرا الأمامية")?.slots?.get("lens"))
+        assertEquals("front", skill.match("شغل الكاميرا الامامية")?.slots?.get("lens"))
+        assertEquals("back", skill.match("open the back camera")?.slots?.get("lens"))
+        assertEquals("back", skill.match("turn on the rear camera")?.slots?.get("lens"))
+        assertEquals("back", skill.match("start back camera")?.slots?.get("lens"))
+        assertEquals("back", skill.match("افتح الكاميرا الخلفية")?.slots?.get("lens"))
+        assertEquals("back", skill.match("شغل الكاميرا الخلفية")?.slots?.get("lens"))
+        assertNull(skill.match("camera off")?.slots?.get("lens"))
+    }
+
+    @Test
+    fun runsStartWithLens() = runBlocking {
+        camera.outcome = CameraOutcome.STARTED
+        assertEquals("Back camera on.", skill.run(skill.match("open the back camera")!!).text)
+        assertEquals("back", camera.lastLens)
+        assertEquals("Front camera on.", skill.run(skill.match("open camera")!!).text)
+        assertEquals("front", camera.lastLens)
+        assertEquals("الكاميرا شغالة.", skill.run(skill.match("شغل الكاميرا الخلفية")!!
+            .also { assertEquals("ar", it.slots["lang"]) }).text)
+        assertEquals("back", camera.lastLens)
+    }
+
+    @Test
     fun ignoresNearbyPhrases() {
         assertNull(skill.match("turn on the flashlight"))
-        assertNull(skill.match("open the camera"))
         assertNull(skill.match("start the timer"))
         assertNull(skill.match("what time is it"))
         assertNull(skill.match("شغل الكشاف"))
         assertNull(skill.match("camera"))
+        assertNull(skill.match("open the camera roll"))
+    }
+
+    @Test
+    fun openCameraIsNotAnAppLaunch() {
+        // The app launcher must not claim camera phrases.
+        assertNull(AppControlPhrases.parse("open camera"))
+        assertNull(AppControlPhrases.parse("open the camera"))
+        assertNull(AppControlPhrases.parse("افتح الكاميرا"))
+        assertNull(AppControlPhrases.parse("start front camera"))
+    }
+
+    @Test
+    fun routerSendsOpenCameraToTheStreamNotTheLauncher() = runBlocking {
+        val registry = SkillRegistry()
+        registry.register(CameraSkill(camera))
+        registry.register(AppControlSkill(AppLauncher()))
+        val router = CommandRouter(registry)
+        val result = router.route("open camera")
+        assertEquals("Front camera on.", result.text)
+        assertTrue(result.success)
+        assertEquals("on", camera.last)
+        assertEquals("front", camera.lastLens)
+        assertFalse(LauncherSpy.called)
     }
 
     @Test
@@ -67,7 +161,7 @@ class CameraSkillTest {
     @Test
     fun runsOnOffAndSwitch() = runBlocking {
         camera.outcome = CameraOutcome.STARTED
-        assertEquals("Camera on.", skill.run(skill.match("camera on")!!).text)
+        assertEquals("Front camera on.", skill.run(skill.match("camera on")!!).text)
         assertEquals("on", camera.last)
 
         camera.outcome = CameraOutcome.STOPPED
@@ -84,9 +178,11 @@ class CameraSkillTest {
 private class FakeCamera : CameraController {
     var outcome = CameraOutcome.STARTED
     var last: String? = null
+    var lastLens: String? = null
 
-    override suspend fun turnOn(): CameraOutcome {
+    override suspend fun turnOn(lens: CameraLens): CameraOutcome {
         last = "on"
+        lastLens = lens.name.lowercase()
         return outcome
     }
 
@@ -98,5 +194,16 @@ private class FakeCamera : CameraController {
     override suspend fun switchCamera(): CameraOutcome {
         last = "switch"
         return outcome
+    }
+}
+
+object LauncherSpy {
+    var called = false
+}
+
+private class AppLauncher : AppControl {
+    override suspend fun perform(call: SkillCall): SkillResult {
+        LauncherSpy.called = true
+        return SkillResult(text = "Opened camera.", success = true)
     }
 }

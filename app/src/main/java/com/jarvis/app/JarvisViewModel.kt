@@ -7,6 +7,7 @@ import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.jarvis.app.system.LanAddress
 import com.jarvis.app.system.ListenForegroundService
 import com.jarvis.app.system.MediaDuck
 import com.jarvis.app.system.WakeLog
@@ -82,6 +83,7 @@ data class JarvisUiState(
     val cameraPort: Int = 8088,
     val cameraLan: String = "",
     val cameraTailscale: String = "",
+    val shelfLan: String = "No Wi-Fi",
     val weatherLabel: String? = null,
     val sources: List<SearchSource> = emptyList(),
     val searchHtml: String? = null,
@@ -118,6 +120,15 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun pushLevel(value: Float) {
         OrbSignals.level = value.coerceIn(0f, 1f)
+    }
+
+    /** Wi-Fi LAN address plus the camera port for the shelf, e.g. 192.168.8.211:8088. */
+    private fun refreshLan() {
+        viewModelScope.launch {
+            val ip = withContext(Dispatchers.IO) { LanAddress.pick(LanAddress.currentCandidates()) }
+            val text = LanAddress.display(ip, app.cameraPort())
+            if (_ui.value.shelfLan != text) _ui.update { it.copy(shelfLan = text) }
+        }
     }
 
     private var holding = false
@@ -195,6 +206,13 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     init {
         app.onVoiceUtterance = { text -> onRecognizedUtterance(text) }
         Log.i(VOICE, "voice loop ready")
+        // The shelf address text follows Wi-Fi changes a little slowly on purpose: ~30 s.
+        viewModelScope.launch {
+            while (isActive) {
+                refreshLan()
+                delay(LAN_REFRESH_MILLIS)
+            }
+        }
         viewModelScope.launch {
             app.announcements.collect { message ->
                 speechQueue.send(
@@ -398,10 +416,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /** A blank password field does not erase a password that is already stored. */
-    fun saveCameraAccess(password: String, portText: String) {
+    fun saveCameraAccess(password: String, portText: String): Boolean {
         val port = portText.trim().toIntOrNull()
-        if (port != null) app.saveCameraPort(port)
+        val portSaved = port != null && app.saveCameraPort(port)
         if (password.isNotEmpty()) app.saveCameraPassword(password)
+        if (portSaved) refreshLan()
         val ends = app.cameraEndpoints()
         _ui.update {
             it.copy(
@@ -412,6 +431,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 cameraTailscale = ends.tailscaleText(),
             )
         }
+        return portSaved
     }
 
     fun onPermissionResult(granted: Boolean) {
@@ -1205,6 +1225,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private companion object {
         const val VOICE = "JarvisVoice"
         const val MAX_UTTERANCE_BYTES = 60 * 16_000 * 2
+        const val LAN_REFRESH_MILLIS = 30_000L
 
         fun spokenPreview(text: String): String {
             return text.replace('\n', ' ')

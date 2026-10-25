@@ -1,6 +1,7 @@
 package com.jarvis.app.ui
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
@@ -13,6 +14,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -21,23 +23,29 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.clickable
+import android.widget.Toast
+import kotlinx.coroutines.delay
 
 private val Groq = Color(0xFFFF9E40)
 private val Mist = Color(0xFF9FB4C8)
 private val Faint = Color(0xFF73808C)
+private const val SAVED_MILLIS = 3_000L
 
 @Composable
 fun GroqSettings(
@@ -50,12 +58,20 @@ fun GroqSettings(
     cameraLan: String,
     cameraTailscale: String,
     onSave: (String) -> Unit,
-    onSaveCamera: (String, String) -> Unit,
+    onSaveCamera: (String, String) -> Boolean,
     onClose: () -> Unit,
 ) {
+    val context = LocalContext.current
     var token by rememberSaveable { mutableStateOf("") }
     var cameraPassword by remember { mutableStateOf("") }
     var portText by remember(cameraPort) { mutableStateOf(cameraPort.toString()) }
+    var savedNote by remember { mutableStateOf(false) }
+    LaunchedEffect(savedNote) {
+        if (savedNote) {
+            delay(SAVED_MILLIS)
+            savedNote = false
+        }
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -182,13 +198,31 @@ fun GroqSettings(
             colors = fieldColors(),
         )
         Spacer(Modifier.height(20.dp))
-        Text(
-            text = "SAVE CAMERA",
-            color = Groq.copy(alpha = 0.9f),
-            fontSize = 14.sp,
-            letterSpacing = 3.sp,
-            modifier = Modifier.clickable { onSaveCamera(cameraPassword, portText) },
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "SAVE CAMERA",
+                color = Groq.copy(alpha = 0.9f),
+                fontSize = 14.sp,
+                letterSpacing = 3.sp,
+                modifier = Modifier.clickable {
+                    // Never show or log the password itself, only that it was stored.
+                    if (onSaveCamera(cameraPassword, portText)) {
+                        Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
+                        savedNote = true
+                        cameraPassword = ""
+                    }
+                },
+            )
+            if (savedNote) {
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = "Saved ✓",
+                    color = Color(0xFF9EE7FF),
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
         Spacer(Modifier.height(16.dp))
         }
     }

@@ -25,6 +25,7 @@ import com.jarvis.core.camera.CameraProfiles
 import com.jarvis.core.camera.CameraThermal
 import com.jarvis.core.camera.ThermalTier
 import com.jarvis.core.skills.CameraController
+import com.jarvis.core.skills.CameraLens
 import com.jarvis.core.skills.CameraOutcome
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
@@ -55,6 +56,7 @@ class CameraStreamService : Service() {
     private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
     private val closed = AtomicBoolean(false)
     private var profile = CameraProfiles.FULL
+    private var requestedLens = CameraLens.DEFAULT
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -71,6 +73,9 @@ class CameraStreamService : Service() {
             finish(CameraOutcome.FAILED)
             stopSelf()
             return START_NOT_STICKY
+        }
+        if (action == ACTION_START) {
+            requestedLens = CameraLens.fromName(intent?.getStringExtra(EXTRA_LENS)) ?: CameraLens.DEFAULT
         }
         when (action) {
             ACTION_SWITCH -> scope.launch { doSwitch() }
@@ -143,7 +148,7 @@ class CameraStreamService : Service() {
         }
         if (closed.get()) return
         val bound = runCatching {
-            session.open(provider, if (webrtcOk) capture.surfaceProvider else null, profile, front = false)
+            session.open(provider, if (webrtcOk) capture.surfaceProvider else null, profile, front = requestedLens == CameraLens.FRONT)
         }.onFailure { error ->
             Log.w(TAG, "camera bind failed: ${error.javaClass.simpleName}")
         }.isSuccess
@@ -311,6 +316,7 @@ class CameraStreamService : Service() {
         private const val ACTION_START = "com.jarvis.app.CAMERA_START"
         private const val ACTION_STOP = "com.jarvis.app.CAMERA_STOP"
         private const val ACTION_SWITCH = "com.jarvis.app.CAMERA_SWITCH"
+        private const val EXTRA_LENS = "lens"
 
         @Volatile
         var running: Boolean = false
@@ -319,7 +325,7 @@ class CameraStreamService : Service() {
         private val gateLock = Any()
         private var gate: CompletableDeferred<CameraOutcome>? = null
 
-        suspend fun start(context: Context): CameraOutcome {
+        suspend fun start(context: Context, lens: CameraLens = CameraLens.DEFAULT): CameraOutcome {
             val app = context.applicationContext
             val jarvis = app as? JarvisApplication
             if (jarvis == null || jarvis.cameraPasswords.get().isEmpty()) {
@@ -333,7 +339,7 @@ class CameraStreamService : Service() {
             Log.i(TAG, "thermal status=$status tier=${CameraThermal.tier(status)}")
             if (CameraThermal.tier(status) == ThermalTier.STOP) return CameraOutcome.THERMAL_STOP
             if (running) return CameraOutcome.ALREADY_ON
-            return request(app, ACTION_START)
+            return request(app, ACTION_START) { it.putExtra(EXTRA_LENS, lens.name.lowercase()) }
         }
 
         suspend fun stop(context: Context): CameraOutcome {
@@ -346,7 +352,7 @@ class CameraStreamService : Service() {
             return request(context.applicationContext, ACTION_SWITCH)
         }
 
-        private suspend fun request(context: Context, action: String): CameraOutcome {
+        private suspend fun request(context: Context, action: String, extras: (Intent) -> Unit = {}): CameraOutcome {
             val deferred = CompletableDeferred<CameraOutcome>()
             val previous = synchronized(gateLock) {
                 val old = gate
@@ -354,7 +360,7 @@ class CameraStreamService : Service() {
                 old
             }
             previous?.complete(CameraOutcome.FAILED)
-            val intent = Intent(context, CameraStreamService::class.java).setAction(action)
+            val intent = Intent(context, CameraStreamService::class.java).setAction(action).also(extras)
             val started = runCatching {
                 if (action == ACTION_START) ContextCompat.startForegroundService(context, intent)
                 else context.startService(intent)
@@ -385,7 +391,7 @@ class CameraStreamService : Service() {
 class AndroidCameraController(context: Context) : CameraController {
     private val app = context.applicationContext
 
-    override suspend fun turnOn(): CameraOutcome = CameraStreamService.start(app)
+    override suspend fun turnOn(lens: CameraLens): CameraOutcome = CameraStreamService.start(app, lens)
 
     override suspend fun turnOff(): CameraOutcome = CameraStreamService.stop(app)
 

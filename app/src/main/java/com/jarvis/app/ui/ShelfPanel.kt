@@ -58,6 +58,7 @@ fun WeatherSlot(
 fun ShelfPanel(
     now: ZonedDateTime,
     weather: WeatherState?,
+    lan: String,
     you: String,
     reply: String,
     sources: List<SearchSource> = emptyList(),
@@ -111,6 +112,16 @@ fun ShelfPanel(
                 weather = weather,
                 color = Color(0xFF7FEFFF).copy(alpha = ink),
                 fontSize = weatherSize,
+            )
+            Text(
+                text = lan,
+                modifier = Modifier.padding(top = 4.dp),
+                color = Color(0xFF9EE7FF).copy(alpha = ink * 0.8f),
+                fontSize = labelSize,
+                fontWeight = FontWeight.Medium,
+                style = TextStyle(textDirection = TextDirection.Content, fontFeatureSettings = "tnum"),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.weight(1f))
             if (you.isEmpty() && reply.isEmpty()) {

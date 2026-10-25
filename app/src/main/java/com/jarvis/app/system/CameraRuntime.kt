@@ -12,7 +12,7 @@ object CameraRuntime {
     val streaming = MutableStateFlow(false)
 
     @Volatile
-    var facingFront: Boolean = false
+    var facingFront: Boolean = true
 
     @Volatile
     var motionSnapshots: MotionSnapshotSink = NoOpMotionSnapshotSink
