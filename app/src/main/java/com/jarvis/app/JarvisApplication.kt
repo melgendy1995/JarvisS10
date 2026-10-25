@@ -88,6 +88,7 @@ class JarvisApplication : Application() {
         private set
 
     private lateinit var bearerStore: KeystoreBearerStore
+    private lateinit var registry: SkillRegistry
     private lateinit var cameraPorts: CameraPortStore
     private lateinit var groqBrain: GroqBrain
     private lateinit var geminiText: GeminiTextBrain
@@ -130,7 +131,7 @@ class JarvisApplication : Application() {
         runBlocking(Dispatchers.IO) {
             PhoneFallbackMigration.run(this@JarvisApplication, memory)
         }
-        val registry = SkillRegistry()
+        registry = SkillRegistry()
         registry.register(TimeSkill())
         registry.register(WeatherSkill(OpenMeteoClient(), AndroidCoarseLocation(this)))
         registry.register(MetalsSkill(SpotQuoteClient()))
@@ -251,6 +252,12 @@ class JarvisApplication : Application() {
     }
 
     fun cameraEndpoints(): CameraEndpoints = StreamAddressLookup.lookup(cameraPort())
+
+    /** True when a local skill would claim the text, without running the skill. */
+    fun matchesLocalSkill(text: String): Boolean {
+        if (!::registry.isInitialized) return false
+        return registry.match(text.trim()) != null
+    }
 
     /** Gemini or Groq can still answer, so a failed on-device transcript is worth a Whisper call. */
     fun cloudBrainReachable(): Boolean {

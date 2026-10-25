@@ -23,7 +23,11 @@ import java.util.Locale
  * instance that has been destroyed. When no recognition service is visible, the
  * caller records the hold and sends it to Whisper.
  */
-class PushToTalkRecognizer(context: Context) {
+class PushToTalkRecognizer(
+    context: Context,
+    /** "auto", "en", or "ar". Auto follows the phone language with an Arabic re-check. */
+    private val voiceLanguage: () -> String = { "auto" },
+) {
     private val appContext = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
@@ -42,7 +46,7 @@ class PushToTalkRecognizer(context: Context) {
     class Callbacks(
         val onLevel: (Float) -> Unit,
         val onPartial: (String) -> Unit,
-        val onFinal: (String) -> Unit,
+        val onFinal: (text: String, confidence: Float) -> Unit,
         val onError: (message: String, hard: Boolean) -> Unit,
         val onFallbackCapture: () -> Unit = {},
         val onRmsDb: (Float) -> Unit = {},
@@ -200,10 +204,10 @@ class PushToTalkRecognizer(context: Context) {
         }
     }
 
-    private fun deliverFinal(text: String) {
+    private fun deliverFinal(text: String, confidence: Float = -1f) {
         if (finished) return
         finished = true
-        callbacks?.onFinal(text)
+        callbacks?.onFinal(text, confidence)
     }
 
     private fun deliverError(message: String, hard: Boolean) {
@@ -218,13 +222,25 @@ class PushToTalkRecognizer(context: Context) {
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, primaryLanguageTag())
+            when (voiceLanguage()) {
+                "en" -> Unit
+                "ar" -> putExtra(ADDITIONAL_LANGUAGES, arrayOf("en-US"))
+                else -> putExtra(ADDITIONAL_LANGUAGES, arrayOf("ar-SA"))
+            }
+            putExtra(RecognizerIntent.EXTRA_CONFIDENCE_SCORES, true)
             if (once) {
                 putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 400L)
                 putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 800L)
                 putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1_200L)
             }
         }
+    }
+
+    private fun primaryLanguageTag(): String = when (voiceLanguage()) {
+        "en" -> "en-US"
+        "ar" -> "ar-SA"
+        else -> Locale.getDefault().toLanguageTag()
     }
 
     private fun visibleTargets(): List<RecognitionTarget> {
@@ -271,9 +287,13 @@ class PushToTalkRecognizer(context: Context) {
         override fun onResults(results: Bundle?) {
             if (generation != session) return
             val text = results.bestHypothesis()
+            val confidence = results
+                ?.getFloatArray(RecognizerIntent.EXTRA_CONFIDENCE_SCORES)
+                ?.firstOrNull()
+                ?: -1f
             main.post {
                 if (generation != session || finished) return@post
-                deliverFinal(text)
+                deliverFinal(text, confidence)
                 destroyRecognizer()
             }
         }
@@ -360,6 +380,8 @@ class PushToTalkRecognizer(context: Context) {
             error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED
     }
 }
+
+private const val ADDITIONAL_LANGUAGES = "android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES"
 
 private fun Bundle?.bestHypothesis(): String {
     return this?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim().orEmpty()

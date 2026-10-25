@@ -10,6 +10,7 @@ import androidx.lifecycle.viewModelScope
 import com.jarvis.app.system.LanAddress
 import com.jarvis.app.system.ListenForegroundService
 import com.jarvis.app.system.MediaDuck
+import com.jarvis.app.system.VoiceLanguageStore
 import com.jarvis.app.system.WakeLog
 import com.jarvis.app.system.WakeRuntime
 import com.jarvis.audio.JarvisSpeaker
@@ -39,6 +40,7 @@ import com.jarvis.orb.BrainAccent
 import com.jarvis.orb.OrbSignals
 import com.jarvis.orb.OrbState
 import com.jarvis.provider.gemini.ModelConfig
+import com.jarvis.provider.groq.ArabicRecheckPolicy
 import com.jarvis.provider.groq.BackupSttPolicy
 import android.util.Log
 import java.io.ByteArrayOutputStream
@@ -108,7 +110,10 @@ private data class SpeechItem(
 
 class JarvisViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as JarvisApplication
-    private val recognizer = PushToTalkRecognizer(application)
+    private val recognizer = PushToTalkRecognizer(
+        context = application,
+        voiceLanguage = { VoiceLanguageStore.get(application) },
+    )
     private val speaker = JarvisSpeaker(application)
     private val duck = MediaDuck(application)
     private val chime = WakeChime(application)
@@ -133,6 +138,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     private var holding = false
     private var heard: String? = null
+    private var heardConfidence = -1f
     private var routed = false
     private var generation = 0
     private var routeJob: Job? = null
@@ -181,8 +187,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         onPartial = { text ->
             if (text.isNotBlank()) _ui.update { it.copy(you = text) }
         },
-        onFinal = { text ->
+        onFinal = { text, confidence ->
             heard = text
+            heardConfidence = confidence
             if (!holding) routeHeard()
         },
         onError = { message, hard ->
@@ -482,9 +489,50 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
         routed = true
         wake.commandHeard()
+        val audio = pendingPcm
         pendingPcm = ByteArray(0)
         waitForResult?.cancel()
+        // Auto mode only: pinned English or Arabic needs no Whisper re-check.
+        val recheck = VoiceLanguageStore.get(getApplication()) == VoiceLanguageStore.AUTO &&
+            ArabicRecheckPolicy.shouldRecheck(
+                whisperReady = app.whisper.ready(),
+                pcmBytes = audio.size,
+                recognizerText = text,
+                matchesLocalSkill = app.matchesLocalSkill(text),
+                confidence = heardConfidence,
+            )
+        if (recheck) {
+            recheckTranscript(text, heardConfidence, audio)
+            return
+        }
         deliver(text)
+    }
+
+    /**
+     * Arabic speech mis-recognized as English gets one Whisper pass before the router
+     * runs. The transcript itself is never logged.
+     */
+    private fun recheckTranscript(text: String, confidence: Float, audio: ByteArray) {
+        val gen = generation
+        routeJob = viewModelScope.launch {
+            val startedAt = System.currentTimeMillis()
+            val whisperText = try {
+                withTimeoutOrNull(3_500L) { app.whisper.transcribe(audio) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }?.trim()?.ifBlank { null }
+            val chosen = ArabicRecheckPolicy.chooseText(text, whisperText)
+            Log.i(
+                VOICE,
+                "stt recheck used=${if (ArabicRecheckPolicy.hasArabic(whisperText)) "whisper" else "recognizer"}" +
+                    " conf=$confidence ms=${System.currentTimeMillis() - startedAt}" +
+                    " arabic=${ArabicRecheckPolicy.hasArabic(chosen)}",
+            )
+            if (!isActive || gen != generation) return@launch
+            deliver(chosen)
+        }
     }
 
     private fun transcribe(audio: ByteArray) {
@@ -923,7 +971,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 if (id != listenId || gen != generation || holding || text.isBlank()) return@Callbacks
                 _ui.update { it.copy(you = text) }
             },
-            onFinal = { text ->
+            onFinal = { text, _ ->
                 if (id != listenId || gen != generation || holding) return@Callbacks
                 val elapsed = SystemClock.elapsedRealtime() - openedAt
                 val stillOpen = followUp && text.isBlank() && !endpointer.heardSpeech &&
@@ -1011,7 +1059,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             callbacks = PushToTalkRecognizer.Callbacks(
                 onLevel = {},
                 onPartial = { text -> onBargeText(token, text, fromFinal = false) },
-                onFinal = { text -> onBargeText(token, text, fromFinal = true) },
+                onFinal = { text, _ -> onBargeText(token, text, fromFinal = true) },
                 onError = { _, _ -> restartBarge(token) },
                 onFallbackCapture = {
                     if (token != bargeSession || holding) return@Callbacks
