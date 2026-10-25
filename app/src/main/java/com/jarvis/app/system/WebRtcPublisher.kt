@@ -9,6 +9,7 @@ import com.jarvis.core.camera.normalizeSdp
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentLinkedDeque
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
@@ -33,9 +34,15 @@ import org.webrtc.VideoTrack
  */
 internal class WebRtcPublisher(context: Context) {
     private val app = context.applicationContext
-    private val executor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "JarvisWebRtc") }
+    private val executor = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "JarvisWebRtc")
+    }
     private val ready = CompletableFuture<Boolean>()
     private val peers = ConcurrentLinkedDeque<PeerConnection>()
+    private val liveness = PeerLiveness<PeerConnection>(
+        nowMillis = { System.currentTimeMillis() },
+        graceMillis = DISCONNECT_GRACE_MS,
+    )
     private var eglBase: EglBase? = null
     private var factory: PeerConnectionFactory? = null
     private var helper: SurfaceTextureHelper? = null
@@ -180,11 +187,13 @@ internal class WebRtcPublisher(context: Context) {
         }
         val candidates = ArrayList<IceCandidate>()
         val gathering = CompletableFuture<Unit>()
-        var self: PeerConnection? = null
-        val peer = created.createPeerConnection(rtcConfig(), observer(candidates, gathering) {
-            self?.let { drop(it) }
+        // The observer needs the peer for liveness bookkeeping; ICE events can only arrive
+        // after createPeerConnection returns sinks it, so a holder is enough.
+        val holder = arrayOfNulls<PeerConnection>(1)
+        val peer = created.createPeerConnection(rtcConfig(), observer(candidates, gathering) { state ->
+            holder[0]?.let { onIceState(it, state) }
         }) ?: return null
-        self = peer
+        holder[0] = peer
         peers.add(peer)
         while (peers.size > 3) {
             val old = peers.pollFirst() ?: break
@@ -220,31 +229,34 @@ internal class WebRtcPublisher(context: Context) {
     private fun observer(
         candidates: MutableList<IceCandidate>,
         gathering: CompletableFuture<Unit>,
-        onDead: () -> Unit,
+        onIce: (PeerConnection.IceConnectionState?) -> Unit,
     ): PeerConnection.Observer {
         return object : PeerConnection.Observer {
             override fun onSignalingChange(newState: PeerConnection.SignalingState?) = Unit
 
             override fun onIceConnectionChange(newState: PeerConnection.IceConnectionState?) {
-                Log.i(TAG, "webrtc ice=$newState")
-                if (newState == PeerConnection.IceConnectionState.FAILED ||
-                    newState == PeerConnection.IceConnectionState.CLOSED ||
-                    newState == PeerConnection.IceConnectionState.DISCONNECTED
-                ) {
-                    onDead()
+                try {
+                    Log.i(TAG, "webrtc ice=$newState")
+                    onIce(newState)
+                } catch (error: Throwable) {
+                    Log.w(TAG, "webrtc ice change handling failed: ${error.javaClass.simpleName}")
                 }
             }
 
             override fun onIceConnectionReceivingChange(receiving: Boolean) = Unit
 
             override fun onIceGatheringChange(newState: PeerConnection.IceGatheringState?) {
-                if (newState == PeerConnection.IceGatheringState.COMPLETE && !gathering.isDone) {
-                    gathering.complete(Unit)
+                runCatching {
+                    if (newState == PeerConnection.IceGatheringState.COMPLETE && !gathering.isDone) {
+                        gathering.complete(Unit)
+                    }
                 }
             }
 
             override fun onIceCandidate(candidate: IceCandidate?) {
-                if (candidate != null) candidates.add(candidate)
+                runCatching {
+                    if (candidate != null) candidates.add(candidate)
+                }
             }
 
             override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>?) = Unit
@@ -334,20 +346,76 @@ internal class WebRtcPublisher(context: Context) {
         return lines.joinToString("\r\n") + "\r\n"
     }
 
+    /**
+     * ICE state bookkeeping. Runs on the WebRTC signaling thread: it must never touch
+     * `PeerConnection.close()`/dispose() or any close-triggered callback, because natives
+     * fire onIceConnectionChange(CLOSED) synchronously during close(), and re-entrant
+     * close/dispose from here is what recursed to StackOverflowError. It only observes
+     * liveness and posts the actual drops onto [executor].
+     */
+    private fun onIceState(peer: PeerConnection, state: PeerConnection.IceConnectionState?) {
+        when (liveness.onIceState(peer, toIceState(state))) {
+            PeerLiveness.Verdict.IGNORE -> Unit
+            PeerLiveness.Verdict.DROP_NOW -> postDrop(peer)
+            PeerLiveness.Verdict.DROP_LATER -> scheduleGraceCheck(peer)
+        }
+    }
+
+    /** DISCONNECTED gets a grace window; after it, drop only if the state never recovered. */
+    private fun scheduleGraceCheck(peer: PeerConnection) {
+        try {
+            executor.schedule({
+                if (liveness.stillFailing(peer)) drop(peer)
+            }, liveness.graceMillis, TimeUnit.MILLISECONDS)
+        } catch (_: RejectedExecutionException) {
+            Log.i(TAG, "webrtc grace check skipped: executor stopped")
+        }
+    }
+
+    private fun toIceState(state: PeerConnection.IceConnectionState?): PeerLiveness.IceState {
+        return when (state) {
+            PeerConnection.IceConnectionState.CONNECTED,
+            PeerConnection.IceConnectionState.COMPLETED,
+            -> PeerLiveness.IceState.CONNECTED
+            PeerConnection.IceConnectionState.DISCONNECTED -> PeerLiveness.IceState.DISCONNECTED
+            PeerConnection.IceConnectionState.FAILED -> PeerLiveness.IceState.FAILED
+            PeerConnection.IceConnectionState.CLOSED -> PeerLiveness.IceState.CLOSED
+            else -> PeerLiveness.IceState.OTHER
+        }
+    }
+
+    private fun postDrop(peer: PeerConnection) {
+        try {
+            executor.execute { drop(peer) }
+        } catch (_: RejectedExecutionException) {
+            Log.i(TAG, "webrtc drop skipped: executor stopped")
+        }
+    }
+
+    /** Only ever runs on [executor]. Closes at most once per peer, and only while tracked. */
     private fun drop(peer: PeerConnection) {
-        peers.remove(peer)
+        if (!liveness.claimDrop(peer)) return
+        if (!peers.remove(peer)) return
         runCatching { peer.close() }
         runCatching { peer.dispose() }
         notifyPeers()
     }
 
-    /** Dead peers stop counting as viewers so the camera can idle out. */
+    /** Dead peers stop counting as viewers so the camera can idle out. Must not throw into JNI. */
     private fun notifyPeers() {
-        runCatching { onPeersChanged?.invoke(peers.size) }
+        try {
+            onPeersChanged?.invoke(peers.size)
+        } catch (error: Throwable) {
+            Log.w(TAG, "webrtc peers changed callback failed: ${error.javaClass.simpleName}")
+        }
     }
 
     companion object {
         private const val TAG = "JarvisCamera"
+
+        /** How long a DISCONNECTED peer gets to reconnect before it is dropped. */
+        private const val DISCONNECT_GRACE_MS = 10_000L
+
         private val initialized = AtomicBoolean(false)
 
         private fun ensureFactoryInit(context: Context) {
