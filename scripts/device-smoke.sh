@@ -99,7 +99,27 @@ front()
 
 tag_stamp()
 {
-  adb_run shell date +'%m-%d %H:%M:%S.000'
+  # The whole remote command must be one double-quoted string: adb joins its
+  # arguments and the device sh then splits on any unquoted space, so a bare
+  # `date +'%m-%d %H:%M:%S.000'` would run as `date +'%m-%d` and print "10-25".
+  adb_run shell "date +'%m-%d %H:%M:%S.000'"
+}
+
+# logcat_since <buffer-args> <marker>
+# Dump the buffer since a timestamp marker. If the marker is malformed (the
+# -T throttle silently blinks "not in time format"), fall back to the last
+# 2000 buffered lines so the checks still see recent output. <buffer-args>
+# is "" for the main buffer or "-b crash" for the crash buffer.
+logcat_since()
+{
+  local buf marker
+  buf="$1"
+  marker="$2"
+  if printf '%s' "$marker" | grep -qE '^[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}$'; then
+    adb_run shell "logcat -d $buf -T '$marker'"
+  else
+    adb_run shell "logcat -d $buf -t 2000"
+  fi
 }
 
 # ask "<text>"
@@ -120,7 +140,7 @@ ask()
     ready_marker=$(tag_stamp)
     for _ in $(seq 1 30); do
       sleep 1
-      if adb_run shell "logcat -d -T '$ready_marker'" |
+      if logcat_since "" "$ready_marker" |
         grep -F "JarvisVoice: voice loop ready" >/dev/null; then
         break
       fi
@@ -134,7 +154,7 @@ ask()
   replies=""
   for _ in $(seq 1 40); do
     sleep 1
-    replies=$(adb_run shell "logcat -d -T '$ASK_MARKER'" |
+    replies=$(logcat_since "" "$ASK_MARKER" |
       grep -F "JarvisVoice: tts speak brain=" || true)
     if [ -n "$replies" ]; then
       break
@@ -147,7 +167,7 @@ ask()
 # logcat -T marker; non-empty output means there was a crash.
 crash_since()
 {
-  adb_run shell "logcat -d -b crash -T '$1'" |
+  logcat_since "-b crash" "$1" |
     grep -F "FATAL EXCEPTION" | grep "$PKG" || true
 }
 
@@ -222,7 +242,7 @@ check_app_running()
     record FAIL app_running "no pidof com.jarvis.app"
     return
   fi
-  crash=$(adb_run shell "logcat -d -b crash -T '$START_MARKER'" |
+  crash=$(logcat_since "-b crash" "$START_MARKER" |
     grep -F "FATAL EXCEPTION" | grep "$PKG" || true)
   if [ -n "$crash" ]; then
     record FAIL app_running "fatal exception since $START_MARKER: $(printf '%s' "$crash" | head -1 | cut -c1-100)"
@@ -311,7 +331,7 @@ check_search_en()
     record FAIL search_en "error reply: $text"
     return
   fi
-  tool=$(adb_run shell "logcat -d -T '$ASK_MARKER'" | grep -F "JarvisSearch: path=" | head -1 || true)
+  tool=$(logcat_since "" "$ASK_MARKER" | grep -F "JarvisSearch: path=" | head -1 || true)
   record PASS search_en "$text${tool:+ | search line: $(printf '%s' "$tool" | cut -c1-90)}"
 }
 
@@ -427,10 +447,10 @@ check_nothing_playing()
   # Not the phrase? A real pause is still a pass: the JarvisAppControl
   # "media control pkg=... action=pause via=session state=N" line, or a guard
   # reroute of the claim.
-  ctl=$(adb_run shell "logcat -d -T '$ASK_MARKER'" |
+  ctl=$(logcat_since "" "$ASK_MARKER" |
     grep -F "media control pkg=" | grep -F "action=pause" |
     grep -F "via=session" | head -1 || true)
-  guard=$(adb_run shell "logcat -d -T '$ASK_MARKER'" |
+  guard=$(logcat_since "" "$ASK_MARKER" |
     grep -F "JarvisBrain: guard claim=" | head -1 || true)
   if [ -n "$ctl" ]; then
     record PASS nothing_playing "real pause via dashboard line: $(printf '%s' "$ctl" | grep -oE 'pkg=[^ ]+ action=[a-z]+ via=[a-z]+ state=[0-9]+' | head -1)${guard:+ | guard: $(printf '%s' "$guard" | cut -c1-60)}"
@@ -504,11 +524,11 @@ check_wake_sim()
   marker=$(tag_stamp)
   adb_run shell "am broadcast -a com.jarvis.app.DEBUG_WAKE -p $PKG --es path hey_jarvis.wav" >/dev/null || true
   sleep 3
-  trig=$(adb_run shell "logcat -d -T '$marker'" | grep -F "JarvisWake: " | grep -F "trigger score=" | head -1 || true)
+  trig=$(logcat_since "" "$marker" | grep -F "JarvisWake: " | grep -F "trigger score=" | head -1 || true)
   if [ -z "$trig" ]; then
     # WakeRuntime logs "score hey_jarvis=X threshold=T state=..." at or above
     # 0.2; a score at or above its own threshold is the fallback signal.
-    score=$(adb_run shell "logcat -d -T '$marker'" |
+    score=$(logcat_since "" "$marker" |
       awk '/JarvisWake:.*hey_jarvis=/ {
         match($0, /hey_jarvis=[0-9.]+/); s = substr($0, RSTART + 11, RLENGTH - 11) + 0
         match($0, /threshold=[0-9.]+/); t = substr($0, RSTART + 10, RLENGTH - 10) + 0
