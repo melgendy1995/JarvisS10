@@ -22,6 +22,7 @@ import com.jarvis.audio.PcmMic
 import com.jarvis.audio.PcmSpeaker
 import com.jarvis.audio.PushToTalkRecognizer
 import com.jarvis.audio.SpeechEnvelope
+import com.jarvis.audio.UtteranceMic
 import com.jarvis.audio.wake.EnergyEndpointer
 import com.jarvis.audio.wake.WakeChime
 import com.jarvis.audio.wake.WakeConfig
@@ -48,6 +49,8 @@ import com.jarvis.orb.OrbState
 import com.jarvis.provider.gemini.ModelConfig
 import com.jarvis.provider.groq.ArabicRecheckPolicy
 import com.jarvis.provider.groq.BackupSttPolicy
+import com.jarvis.provider.groq.GroqTranscript
+import com.jarvis.provider.groq.WhisperAcceptPolicy
 import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.util.Locale
@@ -219,6 +222,10 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private var listenId = 0
     private var settledListen = -1
     private var askedMic = false
+    /** Jarvis's own one-turn recorder while the Whisper-primary path owns the mic (ar/auto). */
+    private var ownMic: UtteranceMic? = null
+
+    @Volatile private var ownCaptureActive = false
     private val wake = WakeRuntime.session
 
     @Volatile private var liveActive = false
@@ -270,6 +277,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     init {
         app.onVoiceUtterance = { text -> onRecognizedUtterance(text) }
+        app.onWhisperPrimaryUtterance = { pcm -> debugWhisperPrimary(pcm) }
+        app.onDebugListen = { debugListen() }
         Log.i(VOICE, "voice loop ready")
         // The shelf address text follows Wi-Fi changes a little slowly on purpose: ~30 s.
         viewModelScope.launch {
@@ -359,6 +368,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         abandonLive()
         speaker.stop()
         recognizer.discard()
+        stopOwnCapture()
         drainQueue()
         duck.release()
         _ui.update {
@@ -381,7 +391,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 if (!holding && gen == generation) resumeWakePassive("hold cancelled")
                 return@launch
             }
-            recognizer.start(callbacks)
+            if (ownCaptureMode()) ownCaptureHold(gen) else recognizer.start(callbacks)
         }
     }
 
@@ -394,6 +404,12 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         _ui.update { it.copy(holding = false) }
         freezeUtterancePcm()
         recognizer.stop()
+        if (ownCaptureActive) {
+            // The own-capture turn owns the routing from here: stopping the recorder
+            // finishes the capture, and its coroutine transcribes and routes.
+            ownMic?.stop()
+            return
+        }
         if (heard != null) {
             routeHeard()
         } else {
@@ -1021,6 +1037,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         listenId++
         recognizer.discard()
         speaker.stop()
+        stopOwnCapture()
         abandonLive()
         utteranceJob?.cancel()
         routeJob?.cancel()
@@ -1060,7 +1077,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             duck.acquireIfPlaying()
             if (playChime) withContext(Dispatchers.IO) { chime.playAndWait() }
             if (gen != generation || holding) return@launch
-            listenHandsFree(gen, followUp = false)
+            if (ownCaptureMode()) {
+                ownCaptureHandsFree(gen, followUp = false)
+            } else {
+                listenHandsFree(gen, followUp = false)
+            }
         }
     }
 
@@ -1071,7 +1092,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         ListenForegroundService.note(getApplication(), "Listening")
         pushLevel(0f)
         _ui.update { it.copy(orb = OrbState.LISTENING, level = 0f, you = "") }
-        listenHandsFree(gen, followUp = true)
+        if (ownCaptureMode()) {
+            ownCaptureHandsFree(gen, followUp = true)
+        } else {
+            listenHandsFree(gen, followUp = true)
+        }
     }
 
     private fun listenHandsFree(gen: Int, followUp: Boolean) {
@@ -1159,6 +1184,237 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         deliver(line, handsFreeTurn = true)
     }
 
+    /** ar/auto never take SpeechRecognizer as the primary transcript; Jarvis owns the mic. */
+    private fun ownCaptureMode(): Boolean =
+        VoiceLanguageStore.get(getApplication()) != VoiceLanguageStore.EN
+
+    private fun ownModeName(): String =
+        if (VoiceLanguageStore.get(getApplication()) == VoiceLanguageStore.AR) "ar" else "auto"
+
+    /** Close a running own-capture recorder so a newer turn can open the mic. */
+    private fun stopOwnCapture() {
+        val mic = ownMic
+        ownMic = null
+        ownCaptureActive = false
+        mic?.stop()
+    }
+
+    /**
+     * Tap path, ar/auto: one own-capture turn from hold start to after release.
+     * The wake recorder was paused before this runs; the endpointer ends the
+     * utterance by silence, and the finger-up stops the recorder.
+     */
+    private fun ownCaptureHold(gen: Int) {
+        startOwnCapture()
+        val mic = ownMic ?: return
+        routeJob = viewModelScope.launch(Dispatchers.IO) {
+            val recording = mic.capture { level -> if (holding) pushLevel(level) }
+            logOwnCaptureEnd(recording)
+            ownCaptureActive = false
+            if (ownMic === mic) ownMic = null
+            // The endpointer may finish while the finger is still down; route on release.
+            while (holding && gen == generation && isActive) delay(40)
+            if (gen != generation || !isActive) return@launch
+            routeOwnRecording(recording, gen, handsFreeTurn = false, followUp = false)
+        }
+    }
+
+    /**
+     * Hands-free path, ar/auto: wake handover or follow-up. Same recording as the
+     * tap path; the turn settles back to passive exactly like [listenHandsFree].
+     */
+    private fun ownCaptureHandsFree(gen: Int, followUp: Boolean) {
+        val id = listenId
+        startOwnCapture()
+        val mic = ownMic ?: return
+        routeJob = viewModelScope.launch(Dispatchers.IO) {
+            val recording = try {
+                mic.capture { level ->
+                    if (id == listenId && _ui.value.orb == OrbState.LISTENING) pushLevel(level)
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                com.jarvis.audio.UtteranceMic.Recording(ByteArray(0), "mic", 0)
+            }
+            logOwnCaptureEnd(recording)
+            ownCaptureActive = false
+            if (ownMic === mic) ownMic = null
+            if (gen != generation || !isActive) return@launch
+            recognizerBusy = false
+            routeOwnRecording(recording, gen, handsFreeTurn = true, followUp = followUp)
+        }
+    }
+
+    private fun startOwnCapture() {
+        Log.i(VOICE, "stt own-capture start mode=${ownModeName()}")
+        ownCaptureActive = true
+        ownMic = UtteranceMic(getApplication())
+    }
+
+    private fun logOwnCaptureEnd(recording: UtteranceMic.Recording) {
+        Log.i(
+            VOICE,
+            "stt own-capture end pcm=${recording.pcm.size} pcmRms=${rmsInt(recording.pcm)} " +
+                "ms=${recording.ms} reason=${recording.reason}",
+        )
+    }
+
+    private fun routeOwnRecording(
+        recording: UtteranceMic.Recording,
+        gen: Int,
+        handsFreeTurn: Boolean,
+        followUp: Boolean,
+    ) {
+        val usable = recording.reason != "mic" && recording.reason != "no-speech" &&
+            recording.pcm.size >= BackupSttPolicy.MIN_PCM_BYTES
+        if (!usable) {
+            finishOwnEmpty(handsFreeTurn, followUp)
+            return
+        }
+        routed = true
+        waitForResult?.cancel()
+        viewModelScope.launch {
+            whisperPrimary(recording.pcm, gen, handsFreeTurn = handsFreeTurn, followUp = followUp)
+        }
+    }
+
+    /** An own-capture turn with no usable audio ends like today's empty transcript. */
+    private fun finishOwnEmpty(handsFreeTurn: Boolean, followUp: Boolean) {
+        if (!handsFreeTurn) {
+            wake.emptyTranscript()
+            showIdle("I didn't hear anything.")
+            return
+        }
+        if (followUp) wake.followUpEnded() else wake.emptyTranscript()
+        endHandsFree(quiet = true)
+    }
+
+    /**
+     * Whisper-primary pipeline for own-capture turns (ar/auto): the language form
+     * field per mode, verbose_json statistics through [WhisperAcceptPolicy], a
+     * retry line for rejected transcripts, routing for accepted ones.
+     */
+    private suspend fun whisperPrimary(
+        pcm: ByteArray,
+        gen: Int,
+        handsFreeTurn: Boolean,
+        followUp: Boolean = false,
+        debug: Boolean = false,
+    ) {
+        val setting = VoiceLanguageStore.get(getApplication())
+        val pinnedArabic = setting == VoiceLanguageStore.AR
+        var timedOut = false
+        val result = try {
+            withTimeoutOrNull(WHISPER_TIMEOUT_MS) {
+                app.whisper.transcribePrimary(pcm, if (pinnedArabic) "ar" else null)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        } ?: kotlin.run {
+            timedOut = true
+            null
+        }
+        val ok = result as? GroqTranscript.Ok
+        val decision = ok?.let { WhisperAcceptPolicy.evaluate(it.text, it.noSpeechProb, it.avgLogprob) }
+        logWhisperOutcome(ok, decision, timedOut)
+        if (!debug && (!coroutineContext.isActive || gen != generation)) return
+        if (ok == null) {
+            if (!debug) finishOwnEmpty(handsFreeTurn, followUp)
+            return
+        }
+        if (decision?.accepted == true) {
+            val text = ok.text.trim()
+            if (debug) {
+                onRecognizedUtterance(text, generation, handsFreeTurn = false)
+            } else {
+                wake.commandHeard()
+                if (handsFreeTurn) {
+                    WakeLog.state("THINKING")
+                    pushLevel(0f)
+                    _ui.update {
+                        it.copy(
+                            orb = OrbState.THINKING,
+                            level = 0f,
+                            you = text,
+                            holding = false,
+                            brain = "",
+                            accent = BrainAccent.PHONE,
+                        )
+                    }
+                }
+                deliver(text, handsFreeTurn = handsFreeTurn)
+            }
+        } else {
+            val detectedArabic = ok.language?.startsWith("ar") == true ||
+                ArabicRecheckPolicy.hasArabic(ok.text)
+            speakOwnRetry(pinnedArabic || detectedArabic)
+        }
+    }
+
+    /** One line per Whisper verdict. Never the transcript. */
+    private fun logWhisperOutcome(
+        ok: GroqTranscript.Ok?,
+        decision: WhisperAcceptPolicy.Decision?,
+        timedOut: Boolean,
+    ) {
+        val reason = when {
+            decision != null -> decision.reason
+            timedOut -> "timeout"
+            else -> "failed"
+        }
+        Log.i(
+            VOICE,
+            "stt whisper chars=${ok?.text?.length ?: 0} lang=${ok?.language ?: "-"} " +
+                "conf=${String.format(Locale.US, "%.2f", ok?.confidence ?: -1f)} " +
+                "accepted=${decision?.accepted ?: false} reason=$reason",
+        )
+    }
+
+    /** Rejected transcript: end the turn with the retry line in the right language. */
+    private suspend fun speakOwnRetry(arabic: Boolean) {
+        duck.release()
+        if (!holding) resumeWakePassive("own retry")
+        speakQueued(
+            Spoken(
+                if (arabic) RETRY_ARABIC else RETRY_ENGLISH,
+                BrainAccent.PHONE,
+                "Phone",
+                "phone",
+            ),
+            handsFreeTurn = false,
+        )
+    }
+
+    /** DEBUG_STT_FILE entry: the same Whisper-primary pipeline, pcm already captured. */
+    private suspend fun debugWhisperPrimary(pcm: ByteArray) {
+        Log.i(VOICE, "debug stt pipeline pcm=${pcm.size}")
+        if (pcm.size < BackupSttPolicy.MIN_PCM_BYTES) {
+            Log.i(VOICE, "stt whisper chars=0 lang=- conf=-1.0 accepted=false reason=pcm-short")
+            return
+        }
+        whisperPrimary(pcm, generation, handsFreeTurn = false, debug = true)
+    }
+
+    /** DEBUG_LISTEN: one real-mic listen turn exactly like a tap or wake handover. */
+    private fun debugListen() {
+        val gen = ++generation
+        handsFree = true
+        bargeStop = false
+        bargeSession++
+        listenId++
+        recognizer.discard()
+        speaker.stop()
+        stopOwnCapture()
+        abandonLive()
+        utteranceJob?.cancel()
+        routeJob?.cancel()
+        waitForResult?.cancel()
+        armCommandListen(gen, playChime = true)
+    }
+
     private fun endHandsFree(quiet: Boolean, message: String = "") {
         if (holding) return
         bargeStop = false
@@ -1218,6 +1474,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 wake.bargeStop()
                 speaker.stop()
                 recognizer.discard()
+                stopOwnCapture()
             }
             WakePhrases.Barge.WAKE -> {
                 val rest = WakePhrases.remainder(text)
@@ -1229,6 +1486,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 listenId++
                 speaker.stop()
                 recognizer.discard()
+                stopOwnCapture()
                 utteranceJob?.cancel()
                 if (!rest.isNullOrBlank()) {
                     recognizerBusy = false
@@ -1382,7 +1640,10 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         app.onVoiceUtterance = null
+        app.onWhisperPrimaryUtterance = null
+        app.onDebugListen = null
         utteranceJob?.cancel()
+        stopOwnCapture()
         if (captureOpen) utteranceMic.stop()
         captureOpen = false
         abandonLive()
@@ -1398,6 +1659,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         const val VOICE = "JarvisVoice"
         const val MAX_UTTERANCE_BYTES = 60 * 16_000 * 2
         const val LAN_REFRESH_MILLIS = 30_000L
+        /** Whisper-primary ceiling; the endpointer cap is 8 s of capture anyway. */
+        const val WHISPER_TIMEOUT_MS = 8_000L
+        /** A rejected transcript ends the turn with this line and no answer. */
+        const val RETRY_ARABIC = "عذراً، ما فهمت. عيدها مرة ثانية."
+        const val RETRY_ENGLISH = "Sorry, I didn't catch that. Say it again."
 
         fun spokenPreview(text: String): String {
             return text.replace('\n', ' ')

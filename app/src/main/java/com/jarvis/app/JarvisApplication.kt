@@ -109,6 +109,17 @@ class JarvisApplication : Application() {
     @Volatile
     var onVoiceUtterance: (suspend (String) -> Unit)? = null
 
+    /**
+     * The Whisper-primary pipeline (language field per mode, confidence policy,
+     * retry line, then routing) for pcm16le already captured, e.g. DEBUG_STT_FILE.
+     */
+    @Volatile
+    var onWhisperPrimaryUtterance: (suspend (ByteArray) -> Unit)? = null
+
+    /** One real-mic listen turn exactly like a tap or wake handover, for adb tests. */
+    @Volatile
+    var onDebugListen: (() -> Unit)? = null
+
     /** Same entry the recognizer uses, including speech. Logs and returns when the activity is down. */
     suspend fun runVoiceUtterance(text: String) {
         val handler = onVoiceUtterance
@@ -118,6 +129,26 @@ class JarvisApplication : Application() {
         }
         val job = voiceScope.launch { handler(text) }
         job.join()
+    }
+
+    /** Whisper-primary entry for captured pcm16le. Logs and returns when the activity is down. */
+    suspend fun runWhisperPrimaryUtterance(pcm: ByteArray) {
+        val handler = onWhisperPrimaryUtterance
+        if (handler == null) {
+            Log.w("JarvisVoice", "voice loop is not running")
+            return
+        }
+        val job = voiceScope.launch { handler(pcm) }
+        job.join()
+    }
+
+    fun debugListen() {
+        val handler = onDebugListen
+        if (handler == null) {
+            Log.w("JarvisVoice", "voice loop is not running")
+            return
+        }
+        handler()
     }
 
     fun setGroqBrowserEnabled(enabled: Boolean) {

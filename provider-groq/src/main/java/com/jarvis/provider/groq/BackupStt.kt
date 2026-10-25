@@ -84,4 +84,16 @@ class GroqWhisperStt(
             GroqTranscript.Failed -> null
         }
     }
+
+    /**
+     * The Whisper-primary pass for own-capture turns (ar/auto): an optional
+     * [language] form field ("ar" in Arabic mode, auto-detect when null) and a
+     * verbose transcript with language and segment statistics.
+     */
+    suspend fun transcribePrimary(pcm16le: ByteArray, languageTag: String?): GroqTranscript {
+        if (!ready() || pcm16le.size < BackupSttPolicy.MIN_PCM_BYTES) return GroqTranscript.Failed
+        log("whisper primary bytes=${pcm16le.size} lang=${languageTag ?: "auto"}")
+        val wav = WavPcm.encode(pcm16le, GroqModels.PCM_SAMPLE_RATE)
+        return transport.transcribe(wav, languageTag)
+    }
 }

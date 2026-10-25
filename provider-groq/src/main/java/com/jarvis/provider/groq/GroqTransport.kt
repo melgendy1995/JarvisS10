@@ -20,7 +20,10 @@ import okio.BufferedSink
 
 interface GroqTransport {
     suspend fun complete(request: GroqChatRequest): GroqChatResult
-    suspend fun transcribe(wav: ByteArray): GroqTranscript
+    suspend fun transcribe(wav: ByteArray): GroqTranscript =
+        transcribe(wav, null)
+    /** [language] pins the Whisper language form field; null is auto-detect. */
+    suspend fun transcribe(wav: ByteArray, language: String?): GroqTranscript
     suspend fun search(query: String): LiveSearchResult
 }
 
@@ -86,9 +89,9 @@ internal class OkHttpGroqTransport(
         }
     }
 
-    override suspend fun transcribe(wav: ByteArray): GroqTranscript {
+    override suspend fun transcribe(wav: ByteArray, language: String?): GroqTranscript {
         val endpoint = endpoint("/audio/transcriptions") ?: return GroqTranscript.Failed
-        val multipart = transcriptionMultipart(wav)
+        val multipart = transcriptionMultipart(wav, language)
         val http = Request.Builder()
             .url(endpoint)
             .header("Authorization", "Bearer ${bearer().trim()}")
@@ -98,8 +101,7 @@ internal class OkHttpGroqTransport(
             if (status !in 200..299) {
                 GroqTranscript.Failed
             } else {
-                val text = GroqProtocol.parseTranscript(body)
-                if (text == null) GroqTranscript.Failed else GroqTranscript.Ok(text)
+                GroqProtocol.parseTranscriptDetailed(body)
             }
         }
     }
@@ -158,13 +160,14 @@ internal class OkHttpGroqTransport(
         val JSON = "application/json; charset=utf-8".toMediaType()
         val WAV = "audio/wav".toMediaType()
 
-        fun transcriptionMultipart(wav: ByteArray): MultipartBody {
-            return MultipartBody.Builder()
+        fun transcriptionMultipart(wav: ByteArray, language: String? = null): MultipartBody {
+            val body = MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
                 .addPart(simpleFormPart("model", GroqModels.WHISPER))
-                .addPart(simpleFormPart("response_format", "json"))
+                .addPart(simpleFormPart("response_format", "verbose_json"))
                 .addFormDataPart("file", "utterance.wav", wav.toRequestBody(WAV))
-                .build()
+            if (!language.isNullOrBlank()) body.addPart(simpleFormPart("language", language))
+            return body.build()
         }
 
         private fun simpleFormPart(name: String, value: String): MultipartBody.Part {

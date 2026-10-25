@@ -12,7 +12,6 @@ import com.jarvis.app.system.CameraStreamService
 import com.jarvis.app.system.ListenForegroundService
 import com.jarvis.app.system.VoiceLanguageStore
 import com.jarvis.audio.wake.WavPcm
-import com.jarvis.provider.groq.ArabicRecheckPolicy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -28,11 +27,15 @@ import kotlinx.coroutines.launch
  * adb shell am broadcast -a com.jarvis.app.DEBUG_VOICE_LANG --es v auto
  * [v] is auto, en, or ar; anything else is ignored by the store.
  *
- * Replay a 16 kHz mono 16-bit wav from the app's files dir through Whisper, then
- * hand the transcript to the voice loop as if it had been spoken:
+ * Replay a 16 kHz mono 16-bit wav from the app's files dir through the Whisper-primary
+ * pipeline (language field per mode, confidence policy, retry line, then routing):
  * adb shell am broadcast -a com.jarvis.app.DEBUG_STT_FILE --es path arabic.wav
  * Files under getExternalFilesDir also work, so a terminal push lands in
  * files/arabic.wav or files/Download.
+ *
+ * Start one real-mic listen turn exactly like a tap or wake handover
+ * (own capture in ar/auto), then give it something to recognice:
+ * adb shell am broadcast -a com.jarvis.app.DEBUG_LISTEN
  *
  * Force the shelf orb for screenshots:
  * adb shell am broadcast -a com.jarvis.app.DEBUG_STATE -p com.jarvis.app --es state idle
@@ -78,6 +81,16 @@ class DebugAskReceiver : BroadcastReceiver() {
         }
         if (intent.action == STT_FILE_ACTION) {
             runSttFile(context, intent)
+            return
+        }
+        if (intent.action == LISTEN_ACTION) {
+            val app = context.applicationContext as? JarvisApplication
+            if (app == null) {
+                Log.w(TAG, "application is not ready")
+                return
+            }
+            Log.i(TAG, "debug listen")
+            app.debugListen()
             return
         }
         if (intent.action == CAMERA_PASSWORD_ACTION) {
@@ -212,11 +225,10 @@ class DebugAskReceiver : BroadcastReceiver() {
                     return@launch
                 }
                 Log.i(TAG, "debug stt bytes=${pcm.size}")
-                val text = app.whisper.transcribe(pcm)?.trim().orEmpty()
-                Log.i(TAG, "debug stt chars=${text.length} arabic=${ArabicRecheckPolicy.hasArabic(text)}")
-                if (text.isEmpty()) return@launch
-                app.runVoiceUtterance(text)
-                Log.i(TAG, "debug stt delivered via voice loop")
+                // The same Whisper-primary pipeline the mic uses: language per mode,
+                // confidence policy, retry line, then routing.
+                app.runWhisperPrimaryUtterance(pcm)
+                Log.i(TAG, "debug stt pipeline finished")
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -260,6 +272,7 @@ class DebugAskReceiver : BroadcastReceiver() {
         const val WAKE_ACTION = "com.jarvis.app.DEBUG_WAKE"
         const val VOICE_LANG_ACTION = "com.jarvis.app.DEBUG_VOICE_LANG"
         const val STT_FILE_ACTION = "com.jarvis.app.DEBUG_STT_FILE"
+        const val LISTEN_ACTION = "com.jarvis.app.DEBUG_LISTEN"
         const val CAMERA_PASSWORD_ACTION = "com.jarvis.app.DEBUG_CAMERA_PASSWORD"
         const val CAMERA_ACTION = "com.jarvis.app.DEBUG_CAMERA"
         const val TAG = "JarvisDebug"

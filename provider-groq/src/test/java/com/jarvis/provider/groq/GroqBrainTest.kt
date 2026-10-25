@@ -331,7 +331,8 @@ class ScriptedTransport : GroqTransport {
         chats += request
         return handler(request)
     }
-    override suspend fun transcribe(wav: ByteArray): GroqTranscript = GroqTranscript.Failed
+    override suspend fun transcribe(wav: ByteArray, language: String?): GroqTranscript =
+        GroqTranscript.Failed
     override suspend fun search(query: String): LiveSearchResult {
         searches += query
         return searchHandler(query)

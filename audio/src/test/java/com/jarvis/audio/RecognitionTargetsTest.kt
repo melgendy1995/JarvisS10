@@ -38,24 +38,24 @@ class RecognitionTargetsTest {
     }
 
     @Test
-    fun arabicPrefersTheOnlineGoogleAppRecognizer() {
+    fun arabicNeverBindsTheOnlineRecognizer() {
         val choice = chooseRecognizer("ar", "en-US", listOf(tts, googleApp), null)
-        assertEquals(googleApp, choice.target)
+        assertEquals(tts, choice.target)
         assertEquals("ar-SA", choice.primaryTag)
         assertEquals(listOf("en-US"), choice.extraTags)
-        assertEquals("ar-SA", choice.preferenceTag)
-        assertEquals(false, choice.preferOffline)
+        assertNull(choice.preferenceTag)
+        assertEquals(true, choice.preferOffline)
         assertEquals("ar", choice.setting)
     }
 
     @Test
-    fun autoKeepsTheDeviceTagOnTheOnlineRecognizer() {
+    fun autoNeverBindsTheOnlineRecognizerEither() {
         val choice = chooseRecognizer("auto", "en-US", listOf(tts, googleApp), null)
-        assertEquals(googleApp, choice.target)
+        assertEquals(tts, choice.target)
         assertEquals("en-US", choice.primaryTag)
         assertEquals(listOf("ar-SA"), choice.extraTags)
         assertNull(choice.preferenceTag)
-        assertEquals(false, choice.preferOffline)
+        assertEquals(true, choice.preferOffline)
     }
 
     @Test

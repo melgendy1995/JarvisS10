@@ -185,6 +185,64 @@ class GroqProtocolTest {
     }
 
     @Test
+    fun verboseTranscriptParsesLanguageAndSegmentStatistics() {
+        val body = """
+            {
+              "text": "الطقس اليوم",
+              "language": "ar",
+              "segments": [
+                {"no_speech_prob": 0.10, "avg_logprob": -0.4},
+                {"no_speech_prob": 0.20, "avg_logprob": -0.6}
+              ]
+            }
+        """.trimIndent()
+        val ok = GroqProtocol.parseTranscriptDetailed(body) as GroqTranscript.Ok
+        assertEquals("الطقس اليوم", ok.text)
+        assertEquals("ar", ok.language)
+        assertEquals(0.15f, ok.noSpeechProb, 1e-4f)
+        assertEquals(-0.5f, ok.avgLogprob, 1e-4f)
+        assertEquals(0.85f, ok.confidence, 1e-4f)
+    }
+
+    @Test
+    fun verboseTranscriptWithoutSegmentsFallsBackToPlainFields() {
+        val ok = GroqProtocol.parseTranscriptDetailed(
+            """{"text":"hello there","language":"en"}""",
+        ) as GroqTranscript.Ok
+        assertEquals("hello there", ok.text)
+        assertEquals("en", ok.language)
+        assertEquals(-1f, ok.noSpeechProb)
+        assertEquals(-1f, ok.avgLogprob)
+        assertEquals(-1f, ok.confidence)
+    }
+
+    @Test
+    fun plainTextOnlyTranscriptStillParses() {
+        val ok = GroqProtocol.parseTranscriptDetailed("""{"text":"hello"}""") as GroqTranscript.Ok
+        assertEquals("hello", ok.text)
+        assertEquals(null, ok.language)
+        assertEquals(-1f, ok.noSpeechProb)
+        assertEquals(-1f, ok.confidence)
+    }
+
+    @Test
+    fun segmentsMissingStatisticsOrNonNumericValuesAreTolerated() {
+        val ok = GroqProtocol.parseTranscriptDetailed(
+            """{"text":"e","segments":[{"x":1},{"no_speech_prob":"nan"}]}""",
+        ) as GroqTranscript.Ok
+        assertEquals("e", ok.text)
+        assertEquals(-1f, ok.noSpeechProb)
+        assertEquals(-1f, ok.avgLogprob)
+        assertEquals(-1f, ok.confidence)
+    }
+
+    @Test
+    fun emptyTextOrBadJsonFailTheTranscript() {
+        assertEquals(GroqTranscript.Failed, GroqProtocol.parseTranscriptDetailed("""{"text":"  "}"""))
+        assertEquals(GroqTranscript.Failed, GroqProtocol.parseTranscriptDetailed("not json"))
+    }
+
+    @Test
     fun chatPostGoesToTheProxyWithTheWorkerBearer() = runBlocking {
         val server = MockWebServer()
         server.enqueue(

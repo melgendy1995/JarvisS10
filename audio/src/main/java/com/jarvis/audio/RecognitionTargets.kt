@@ -27,8 +27,6 @@ internal fun pickRecognitionTarget(
 
 /**
  * Everything one listen needs: the service to bind and the language extras.
- * The offline Speech Services by Google pack on this phone is English only, so
- * auto and ar ask for the online Google app recognizer instead.
  */
 internal data class RecognizerChoice(
     val target: RecognitionTarget?,
@@ -43,12 +41,12 @@ internal data class RecognizerChoice(
 }
 
 /**
- * Pure per-language recognizer choice. "en" keeps the offline-first behaviour;
- * "ar" and "auto" prefer the online Google app recognizer (no PREFER_OFFLINE) —
- * "ar" pins ar-SA with en-US as the second language, "auto" keeps the device
- * tag and offers ar-SA as the second language. When the Google app recognizer
- * is not visible or [forceOffline] is set, the existing fallback choice is used
- * with the offline extras. Returns target=null when no service is visible.
+ * Pure per-language recognizer choice, offline-first for every setting.
+ * "ar" and "auto" never bind the online Google app recognizer: the primary
+ * path for them is Jarvis's own capture plus Whisper, and the recognizer is
+ * only ever a fallback. "ar" asks ar-SA with en-US as the second language,
+ * "auto" keeps the device tag and offers ar-SA. [forceOffline] is kept for
+ * compat and changes nothing now that the online preference is gone.
  */
 internal fun chooseRecognizer(
     setting: String,
@@ -57,34 +55,11 @@ internal fun chooseRecognizer(
     selected: RecognitionTarget?,
     forceOffline: Boolean = false,
 ): RecognizerChoice {
-    val fallbackTarget = pickRecognitionTarget(available, selected)
     if (available.isEmpty()) {
         return RecognizerChoice(null, deviceTag, emptyList(), preferOffline = true, setting = setting)
     }
-    if (!forceOffline && setting != "en") {
-        available.firstOrNull { it.packageName == GOOGLE_APP_PACKAGE }?.let { googleApp ->
-            return if (setting == "ar") {
-                RecognizerChoice(
-                    target = googleApp,
-                    primaryTag = "ar-SA",
-                    extraTags = listOf("en-US"),
-                    preferenceTag = "ar-SA",
-                    preferOffline = false,
-                    setting = setting,
-                )
-            } else {
-                RecognizerChoice(
-                    target = googleApp,
-                    primaryTag = deviceTag,
-                    extraTags = listOf("ar-SA"),
-                    preferOffline = false,
-                    setting = setting,
-                )
-            }
-        }
-    }
     return RecognizerChoice(
-        target = fallbackTarget,
+        target = pickRecognitionTarget(available, selected),
         primaryTag = VoiceLanguageTags.resolve(setting, deviceTag),
         extraTags = when (setting) {
             "ar" -> listOf("en-US")

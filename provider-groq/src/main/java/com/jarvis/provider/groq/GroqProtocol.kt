@@ -10,6 +10,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 
 data class ToolCallSpec(
     val id: String,
@@ -71,7 +72,19 @@ sealed class GroqChatResult {
 }
 
 sealed class GroqTranscript {
-    data class Ok(val text: String) : GroqTranscript()
+    /**
+     * A Whisper transcript. [language] is the detected language when
+     * response_format carried it, [noSpeechProb] and [avgLogprob] are the segment
+     * means (-1 when the body had no segments), [confidence] a 0..1 value or -1
+     * when segments were missing.
+     */
+    data class Ok(
+        val text: String,
+        val language: String? = null,
+        val noSpeechProb: Float = -1f,
+        val avgLogprob: Float = -1f,
+        val confidence: Float = -1f,
+    ) : GroqTranscript()
     data object Failed : GroqTranscript()
 }
 
@@ -184,6 +197,41 @@ object GroqProtocol {
     fun parseTranscript(body: String): String? {
         val root = runCatching { json.parseToJsonElement(body) }.getOrNull() as? JsonObject ?: return null
         return (root["text"] as? JsonPrimitive)?.contentOrNull?.trim()?.ifBlank { null }
+    }
+
+    /**
+     * Verbose transcription JSON: text, language, and per-segment no_speech_prob
+     * and avg_logprob. Tolerant: missing segments fall back to the plain text.
+     */
+    fun parseTranscriptDetailed(body: String): GroqTranscript {
+        val root = runCatching { json.parseToJsonElement(body) }.getOrNull() as? JsonObject
+            ?: return GroqTranscript.Failed
+        val text = (root["text"] as? JsonPrimitive)?.contentOrNull?.trim()?.ifBlank { null }
+            ?: return GroqTranscript.Failed
+        val language = (root["language"] as? JsonPrimitive)?.contentOrNull?.trim()?.ifBlank { null }
+        val segments = root["segments"] as? JsonArray ?: return GroqTranscript.Ok(text, language)
+        val noSpeech = segments.meanOf("no_speech_prob")
+        val logProb = segments.meanOf("avg_logprob")
+        val confidence = if (noSpeech == null) {
+            -1f
+        } else {
+            (1f - noSpeech).coerceIn(0f, 1f)
+        }
+        return GroqTranscript.Ok(
+            text = text,
+            language = language,
+            noSpeechProb = noSpeech ?: -1f,
+            avgLogprob = logProb ?: -1f,
+            confidence = confidence,
+        )
+    }
+
+    private fun JsonArray.meanOf(field: String): Float? {
+        val values = mapNotNull { element ->
+            (element as? JsonObject)?.get(field) as? JsonPrimitive
+        }.mapNotNull { it.doubleOrNull }
+        if (values.isEmpty()) return null
+        return (values.average().toFloat())
     }
 
     fun parseRetryAfter(header: String?, body: String): Duration? {
