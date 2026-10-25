@@ -197,6 +197,8 @@ class AndroidAppControl(context: Context) : AppControl {
         stale: List<UiNode>,
     ): Boolean {
         Log.i(TAG, "ytm screen ${service.screenWidth()}x${service.screenHeight()} enabled=${JarvisAccessibilityService.isEnabled(appContext)}")
+        // Al Kahf (or any track) already playing makes "started" true at once; require a new item.
+        val before = trackKey(AppMatcher.YOUTUBE_MUSIC)
         for (attempt in 0 until 3) {
             if (attempt == 0) {
                 if (awaitFreshYouTubeMusicResults(service, query, stale)) {
@@ -220,13 +222,21 @@ class AndroidAppControl(context: Context) : AppControl {
             Log.i(TAG, "ytm tap \"$label\"")
             service.tap(pick)
             delay(1_500)
-            if (awaitStarted(AppMatcher.YOUTUBE_MUSIC, 4_000)) {
+            if (awaitStarted(AppMatcher.YOUTUBE_MUSIC, 4_000) &&
+                awaitNewTrack(AppMatcher.YOUTUBE_MUSIC, query, before, slices = 16)
+            ) {
                 Log.i(TAG, "ytm started=true")
                 return true
             }
+            if (before != null && playback.isStarted(AppMatcher.YOUTUBE_MUSIC)) {
+                Log.i(TAG, "ytm old track still playing, retrying tap")
+                continue
+            }
             Log.i(TAG, "ytm started=false, media key backup")
             playback.dispatch(KeyEvent.KEYCODE_MEDIA_PLAY)
-            if (awaitStarted(AppMatcher.YOUTUBE_MUSIC, 4_000)) {
+            if (awaitStarted(AppMatcher.YOUTUBE_MUSIC, 4_000) &&
+                awaitNewTrack(AppMatcher.YOUTUBE_MUSIC, query, before, slices = 8)
+            ) {
                 Log.i(TAG, "ytm started=true (media key)")
                 return true
             }
