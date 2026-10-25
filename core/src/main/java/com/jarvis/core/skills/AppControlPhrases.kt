@@ -31,6 +31,7 @@ object AppControlPhrases {
         returning(text)?.let { return it + langSlot(lang) }
         volume(text, wantsPercent)?.let { return it + langSlot(lang) }
         media(text)?.let { return it + langSlot(lang) }
+        playAppFirst(text)?.let { return it + langSlot(lang) }
         play(text)?.let { return it + langSlot(lang) }
         open(text)?.let { return it + langSlot(lang) }
         return null
@@ -86,15 +87,41 @@ object AppControlPhrases {
     }
 
     private fun media(text: String): Map<String, String>? {
-        val which = when {
-            text in PAUSE || PAUSE_EN.matches(text) -> "pause"
-            text in RESUME || RESUME_EN.matches(text) -> "resume"
-            text in NEXT || NEXT_EN.matches(text) -> "next"
-            text in PREVIOUS || PREVIOUS_EN.matches(text) -> "previous"
-            else -> return null
+        var which: String? = null
+        var target: String? = null
+        when {
+            text in PAUSE || PAUSE_EN.matches(text) || STILL_PLAYING.matches(text) -> which = "pause"
+            PAUSE_APP.matches(text) -> mediaApp(PAUSE_APP.matchEntire(text)!!)?.let {
+                which = "pause"
+                target = it
+            }
+            text in RESUME || RESUME_EN.matches(text) -> which = "resume"
+            RESUME_APP.matches(text) -> mediaApp(RESUME_APP.matchEntire(text)!!)?.let {
+                which = "resume"
+                target = it
+            }
+            text in NEXT || NEXT_EN.matches(text) -> which = "next"
+            NEXT_APP.matches(text) -> mediaApp(NEXT_APP.matchEntire(text)!!)?.let {
+                which = "next"
+                target = it
+            }
+            text in PREVIOUS || PREVIOUS_EN.matches(text) -> which = "previous"
+            PREVIOUS_APP.matches(text) -> mediaApp(PREVIOUS_APP.matchEntire(text)!!)?.let {
+                which = "previous"
+                target = it
+            }
         }
-        return mapOf("action" to MEDIA, "media" to which)
+        val settled = which ?: return null
+        val base = mapOf("action" to MEDIA, "media" to settled)
+        return if (target == null) {
+            base
+        } else {
+            base + ("target" to target)
+        }
     }
+
+    /** App-named media phrase: the app token sets the target slot, null when unknown. */
+    private fun mediaApp(match: MatchResult): String? = targetOf(match.groupValues[1])
 
     private fun play(text: String): Map<String, String>? {
         val targeted = PLAY_ON.matchEntire(text)
@@ -109,7 +136,24 @@ object AppControlPhrases {
         val query = plain.groupValues[1].trim()
         if (query.isEmpty()) return null
         transportQuery(query)?.let { return mapOf("action" to MEDIA, "media" to it) }
+        appOnlyOpen(query)?.let { return it }
         return mapOf("action" to PLAY, "query" to query, "target" to "")
+    }
+
+    /** "شغل يوتيوب ميوزك" with no song: just launch the music app. */
+    private fun appOnlyOpen(name: String): Map<String, String>? = when (targetOf(name)) {
+        TARGET_YOUTUBE_MUSIC -> mapOf("action" to OPEN, "target" to TARGET_YOUTUBE_MUSIC)
+        TARGET_SPOTIFY -> mapOf("action" to OPEN, "target" to TARGET_SPOTIFY)
+        else -> null
+    }
+
+    /** App-name-first order: "افتح يوتيوب ميوزك وشغل سورة الكهف", "على يوتيوب ميوزك شغل سورة الكهف". */
+    private fun playAppFirst(text: String): Map<String, String>? {
+        val match = PLAY_APP_FIRST.matchEntire(text) ?: return null
+        val target = targetOf(match.groupValues[1]) ?: return null
+        val query = match.groupValues[2].trim()
+        if (query.isEmpty()) return null
+        return mapOf("action" to PLAY, "query" to query, "target" to target)
     }
 
     private fun open(text: String): Map<String, String>? {
@@ -117,6 +161,7 @@ object AppControlPhrases {
         val name = match.groupValues[1].trim()
         if (name.isEmpty() || name.length > 80 || name.split(' ').size > 4) return null
         if (EXCLUDED_OPEN.containsMatchIn(name)) return null
+        appOnlyOpen(name)?.let { return it }
         return mapOf("action" to OPEN, "target" to name)
     }
 
@@ -127,9 +172,12 @@ object AppControlPhrases {
     }
 
     private fun targetOf(token: String): String? = when (token) {
-        "youtube", "you tube", "يوتيوب", "يوتوب", "اليوتيوب" -> TARGET_YOUTUBE
-        "youtube music", "yt music", "يوتيوب ميوزك", "يوتيوب ميوزيك" -> TARGET_YOUTUBE_MUSIC
-        "spotify", "سبوتيفاي", "سبوتفاي" -> TARGET_SPOTIFY
+        "youtube", "you tube", "يوتيوب", "يوتوب", "اليوتيوب", "بيوتيوب" -> TARGET_YOUTUBE
+        "youtube music", "yt music", "you tube music",
+        "يوتيوب ميوزك", "يوتيوب ميوزيك", "يوتيوب موسيقي", "يو تيوب ميوزك",
+        "بيوتيوب ميوزك", "بيوتيوب ميوزيك", "بيوتيوب موسيقي", "بيو تيوب ميوزك",
+        -> TARGET_YOUTUBE_MUSIC
+        "spotify", "سبوتيفاي", "سبوتفاي", "بسبوتيفاي" -> TARGET_SPOTIFY
         "samsung music", "samsung", "سامسونج ميوزك", "سامسونج" -> TARGET_SAMSUNG
         else -> null
     }
@@ -198,6 +246,13 @@ object AppControlPhrases {
         """^(?:خلي الصوت|اضبط الصوت|ضبط الصوت|الصوت|صوت)\s+(\d{1,3})\s*(?:بالميه|بالمئه|في الميه|%)?$""",
     )
 
+    // App tokens in normalized form. Longest words first so alternation prefers the music apps.
+    private const val APP =
+        "youtube music|yt music|you tube music|you tube|youtube|spotify|samsung music|samsung|" +
+            "يوتيوب ميوزك|يوتيوب ميوزيك|يوتيوب موسيقي|يو تيوب ميوزك|" +
+            "بيوتيوب ميوزك|بيوتيوب ميوزيك|بيوتيوب موسيقي|بيو تيوب ميوزك|" +
+            "يوتيوب|يوتوب|اليوتيوب|بيوتيوب|سبوتيفاي|سبوتفاي|بسبوتيفاي|سامسونج ميوزك|سامسونج"
+
     private val PAUSE = setOf(
         "وقف",
         "اوقف",
@@ -209,43 +264,97 @@ object AppControlPhrases {
         "اوقف الفيديو",
         "وقف الفيديو",
         "اوقف الموسيقي",
+        "وقف الموسيقي",
+        "اوقف الاغنيه",
+        "وقف الاغنيه",
+        "وقف الاغاني",
+        "اوقف الاغاني",
+        "اسكت الموسيقي",
+        "اسكت",
     )
     private val RESUME = setOf(
         "كمل",
         "كمل التشغيل",
+        "كمل الموسيقي",
+        "كمل الاغنيه",
         "استمر",
         "استئناف",
         "استانف",
         "تشغيل",
         "شغل",
+        "رجع شغل",
     )
-    private val NEXT = setOf("التالي", "الي بعده", "اللي بعده", "بعده", "الفيديو التالي", "الاغنيه التاليه")
-    private val PREVIOUS = setOf("السابق", "الي قبله", "اللي قبله", "قبله", "الفيديو السابق")
+    private val NEXT = setOf(
+        "التالي",
+        "الي بعده",
+        "اللي بعده",
+        "بعده",
+        "الفيديو التالي",
+        "الاغنيه التاليه",
+        "الاغنيه اللي بعدها",
+        "الي بعدها",
+        "اللي بعدها",
+    )
+    private val PREVIOUS = setOf(
+        "السابق",
+        "الي قبله",
+        "اللي قبله",
+        "قبله",
+        "الفيديو السابق",
+        "الاغنيه اللي قبلها",
+        "الي قبلها",
+        "اللي قبلها",
+    )
 
     private val PAUSE_EN = Regex(
-        """^(?:please\s+)?(?:pause|pause (?:the )?(?:video|music|song|playback)|stop (?:the )?(?:video|music|song|playback))$""",
+        """^(?:please\s+)?(?:pause|pause (?:the )?(?:video|music|song|playback)|stop (?:the )?(?:video|music|song|playback|it))$""",
     )
     private val RESUME_EN = Regex(
-        """^(?:please\s+)?(?:resume|resume playback|continue|continue playing|unpause|play)$""",
+        """^(?:please\s+)?(?:resume(?:\s+(?:the\s+)?(?:playback|music|video))?|continue(?:\s+playing|\s+the\s+music)?|play(?:\s+again)?|unpause)$""",
     )
     private val NEXT_EN = Regex(
-        """^(?:please\s+)?(?:next|next (?:track|song|video)|skip song|skip track)$""",
+        """^(?:please\s+)?(?:next|next (?:track|song|video)|skip song|skip track|skip|skip it)$""",
     )
     private val PREVIOUS_EN = Regex(
         """^(?:please\s+)?(?:previous|previous (?:track|song|video)|last song|go back a song)$""",
     )
 
+    /** "still not stopped" means pause even though nothing else matches. */
+    private val STILL_PLAYING = Regex(
+        """^(?:still\s+(?:not\s+)?stop(?:ped)?|it\s+is\s+still\s+playing|its\s+still\s+playing)$""",
+    )
+
+    /** Media verbs that may take an app name; the app token is [APP], group 1. */
+    private val PAUSE_APP = Regex(
+        """^(?:please\s+|ممكن\s+|لو سمحت\s+)?(?:pause|stop|وقف|اوقف|توقف|ايقاف|اسكت)(?:\s+(?:the\s+)?(?:video|music|song|playback|التشغيل|الفيديو|الموسيقي|الاغنيه|الاغاني|موقت))?(?:\s+(?:on|in|using|via|علي|على|في|من))?\s*(${APP})$""",
+    )
+    private val RESUME_APP = Regex(
+        """^(?:please\s+|ممكن\s+|لو سمحت\s+)?(?:resume(?:\s+(?:the\s+)?(?:playback|music|video))?|كمل(?:\s+(?:الموسيقي|الاغنيه|التشغيل))?)(?:\s+(?:on|in|علي|على|في|من))?\s*(${APP})$""",
+    )
+    private val NEXT_APP = Regex(
+        """^(?:please\s+|ممكن\s+|لو سمحت\s+)?(?:next(?:\s+(?:song|track|video))?|skip|التالي|الاغنيه اللي بعدها|الي بعده|اللي بعده|الي بعدها|اللي بعدها)(?:\s+(?:on|in|علي|على|في|من))?\s*(${APP})$""",
+    )
+    private val PREVIOUS_APP = Regex(
+        """^(?:please\s+|ممكن\s+|لو سمحت\s+)?(?:previous(?:\s+(?:song|track|video))?|السابق|الاغنيه اللي قبلها|الي قبله|اللي قبله|الي قبلها|اللي قبلها)(?:\s+(?:on|in|علي|على|في|من))?\s*(${APP})$""",
+    )
+
+    private val PLAY_VERBS =
+        """play|put on|شغللي|شغلي|شغل|تشغيل|تشغل|اسمعني|اسمع|سمعني|حطلي|حط|ابغي اسمع|ابي اسمع"""
+
     private val PLAY_ON = Regex(
-        """^(?:please\s+)?(?:can you\s+)?(?:play|put on|شغل|تشغيل|اسمع)\s+(.+?)\s+(?:on|in|using|via|علي|في)\s+(?:the\s+|ال\s*)?(youtube music|youtube|you tube|spotify|samsung music|samsung|يوتيوب ميوزك|يوتيوب ميوزيك|يوتيوب|يوتوب|اليوتيوب|سبوتيفاي|سبوتفاي|سامسونج ميوزك|سامسونج)$""",
+        """^(?:please\s+|ممكن\s+|لو سمحت\s+)?(?:can you\s+)?(?:$PLAY_VERBS)\s+(.+?)\s+(?:on|in|using|via|علي|في|من|ب)\s*($APP)$""",
     )
     private val PLAY_QUERY = Regex(
-        """^(?:please\s+)?(?:can you\s+)?(?:play|put on|شغل|تشغيل|اسمع)\s+(.+)$""",
+        """^(?:please\s+|ممكن\s+|لو سمحت\s+)?(?:can you\s+)?(?:$PLAY_VERBS)\s+(.+)$""",
+    )
+    private val PLAY_APP_FIRST = Regex(
+        """^(?:ممكن\s+|لو سمحت\s+)?(?:افتح(?:لي)?|شغل(?:لي)?|حط(?:لي)?|اسمع(?:ني)?)?\s*(?:علي|على|في|من)?\s*($APP)\s+(?:و)?(?:شغللي|شغلي|شغل|حطلي|حط|اسمعني|اسمع|تشغل|تشغيل)\s+(.+)$""",
     )
     private val OPEN_EN = Regex(
         """^(?:please\s+)?(?:can you\s+)?(?:open|launch|start)\s+(?:the\s+|app\s+)?(.+)$""",
     )
     private val OPEN_AR = Regex(
-        """^(?:من فضلك\s+)?(?:افتح|فتح)\s+(?:تطبيق\s+)?(.+)$""",
+        """^(?:من فضلك\s+|ممكن\s+|لو سمحت\s+)?(?:افتحلي|افتح|فتح)\s+(?:تطبيق\s+)?(.+)$""",
     )
     // Camera phrases belong to CameraSkill, never to launching com.sec.android.app.camera.
     private val EXCLUDED_OPEN = Regex("""(?:timer|countdown|موقت|تايمر|flashlight|torch|كشاف|فلاش|camera|كاميرا)""")

@@ -17,7 +17,7 @@ object Utterances {
                 'ء' -> Unit
                 in '٠'..'٩' -> sb.append('0' + (ch - '٠'))
                 in '۰'..'۹' -> sb.append('0' + (ch - '۰'))
-                in '\u064B'..'\u065F', '\u0670' -> Unit
+                in '\u064B'..'\u065F', '\u0670', '\u0640' -> Unit
                 '\'' , '’', 'ʻ', '`' -> Unit
                 '-' -> sb.append(' ')
                 else -> sb.append(ch.lowercaseChar())

@@ -1,11 +1,16 @@
 package com.jarvis.app.system
 
 import android.content.ActivityNotFoundException
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioManager
+import android.media.session.MediaController
+import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
 import android.net.Uri
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import android.view.KeyEvent
@@ -354,36 +359,96 @@ class AndroidAppControl(context: Context) : AppControl {
             "previous" -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
             else -> return SkillResult(if (arabic) "ما فهمتش." else "I didn't catch that.", success = false)
         }
-        playback.dispatch(key)
+        val target = packageForTarget(slots["target"].orEmpty())
+        val controllers = sessionControls()
+        var pkg = "none"
+        var via = "key"
+        val chosen = MediaSessionPicker.choose(controllers.map { it.session }, target)
+        val picked = chosen?.let { pick -> controllers.first { it.session.packageName == pick.packageName } }
+        if (picked != null) {
+            pkg = picked.session.packageName
+            try {
+                performTransport(picked.controller.transportControls, which)
+                via = "session"
+            } catch (e: Exception) {
+                Log.i(TAG, "transport controls failed $pkg $which", e)
+                playback.dispatch(key)
+            }
+        } else {
+            playback.dispatch(key)
+        }
         delay(700)
+        val fresh = if (pkg == "none") null else sessionState(pkg)
+        val state = fresh ?: PlaybackState.STATE_NONE
+        val played = fresh == PlaybackState.STATE_PLAYING || anyWatchedStarted()
+        Log.i(TAG, "media control pkg=$pkg action=$which via=$via state=$state")
         val youtube = JarvisAccessibilityService.instance
-        if (youtube != null && which != "previous") {
-            val still = when (which) {
-                "pause" -> playback.isStarted(AppMatcher.YOUTUBE)
-                "resume" -> !playback.isStarted(AppMatcher.YOUTUBE)
-                else -> false
-            }
-            if (still) {
-                val action = if (which == "resume") "play" else which
-                youtube.tapControl(action)
-                delay(500)
-            }
+        val tapNeeded = when (which) {
+            "pause" -> played
+            "resume" -> !played
+            else -> false
         }
-        val ok = when (which) {
-            "pause" -> !anyWatchedStarted()
-            "resume" -> anyWatchedStarted() || true
-            else -> true
+        if (youtube != null && which != "previous" && tapNeeded) {
+            val action = if (which == "resume") "play" else which
+            youtube.tapControl(action)
+            delay(500)
         }
-        if (which == "pause" && anyWatchedStarted()) {
-            return SkillResult(if (arabic) "ما قدرت أوقف." else "I couldn't pause that.", success = false)
+        if (which == "pause" && played) {
+            return SkillResult(if (arabic) "ما قدرت أوقفه." else "I couldn't pause it.", success = false)
         }
         val text = when (which) {
-            "pause" -> if (arabic) "وقفت." else "Paused."
+            "pause" -> if (arabic) "تم الإيقاف." else "Paused."
             "resume" -> if (arabic) "كملت." else "Playing."
             "next" -> if (arabic) "التالي." else "Next."
             else -> if (arabic) "السابق." else "Previous."
         }
-        return SkillResult(text, success = ok)
+        return SkillResult(text)
+    }
+
+    private fun performTransport(controls: MediaController.TransportControls, which: String) {
+        when (which) {
+            "pause" -> controls.pause()
+            "resume" -> controls.play()
+            "next" -> controls.skipToNext()
+            else -> controls.skipToPrevious()
+        }
+    }
+
+    private data class SessionControl(
+        val session: MediaSessionPicker.Session,
+        val controller: MediaController,
+    )
+
+    private fun sessionControls(): List<SessionControl> {
+        val manager = appContext.getSystemService(MediaSessionManager::class.java)
+        val listener = ComponentName(appContext, JarvisMediaListener::class.java)
+        return try {
+            manager.getActiveSessions(listener).mapNotNull { controller ->
+                val state = controller.playbackState?.state ?: PlaybackState.STATE_NONE
+                MediaSessionPicker.Session(controller.packageName, state, SystemClock.uptimeMillis())
+            }.map { SessionControl(it, controllerOf(it.packageName)) }
+        } catch (e: SecurityException) {
+            Log.i(TAG, "media sessions blocked, media key fallback")
+            emptyList()
+        }
+    }
+
+    private fun sessionState(packageName: String): Int? {
+        val manager = appContext.getSystemService(MediaSessionManager::class.java)
+        val listener = ComponentName(appContext, JarvisMediaListener::class.java)
+        return try {
+            manager.getActiveSessions(listener)
+                .firstOrNull { it.packageName == packageName }
+                ?.playbackState?.state
+        } catch (e: SecurityException) {
+            null
+        }
+    }
+
+    private fun controllerOf(packageName: String): MediaController {
+        val manager = appContext.getSystemService(MediaSessionManager::class.java)
+        val listener = ComponentName(appContext, JarvisMediaListener::class.java)
+        return manager.getActiveSessions(listener).first { it.packageName == packageName }
     }
 
     private fun volume(slots: Map<String, String>): SkillResult {
@@ -445,8 +510,12 @@ class AndroidAppControl(context: Context) : AppControl {
         return SkillResult(if (arabic) "تخطيت الإعلان." else "Skipped the ad.")
     }
 
-    private fun goBack(slots: Map<String, String>): SkillResult {
+    private suspend fun goBack(slots: Map<String, String>): SkillResult {
         val arabic = slots["lang"] == "ar"
+        if (anyWatchedStarted()) {
+            playback.dispatch(KeyEvent.KEYCODE_MEDIA_PAUSE)
+            delay(500)
+        }
         playback.cancelKeep()
         playback.disarm()
         KioskGate.returnToJarvis(appContext)
