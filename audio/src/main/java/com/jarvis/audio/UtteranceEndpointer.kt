@@ -19,6 +19,11 @@ class UtteranceEndpointer(
     private val maxUtteranceMs: Long = 8_000,
     private val speechHoldMs: Long = 120,
     private val prerollMs: Long = 300,
+    /**
+     * Frames in this opening window are recorded but never gate: the tail of
+     * Jarvis's own reply or the wake chime echoes there and is not the user.
+     */
+    private val warmupMs: Long = 0,
 ) {
     private var elapsedMs = 0L
     private var speechMs = 0L
@@ -61,6 +66,7 @@ class UtteranceEndpointer(
     /** [rms] is the 0..1 frame level from PcmLevel.rms16; [frameMs] the frame duration. */
     fun onRms(rms: Float, frameMs: Long): Decision {
         elapsedMs += frameMs
+        if (elapsedMs <= warmupMs) return Decision.CONTINUE
         if (rms > peak) peak = rms
         if (!heard) {
             if (rms >= onsetThreshold()) {
@@ -73,7 +79,9 @@ class UtteranceEndpointer(
             }
             return Decision.CONTINUE
         }
-        val quiet = maxOf(quietLevel() * SILENCE_TIMES, quietLevel() + SILENCE_STEP)
+        // ABS_QUIET keeps hysteresis below the onset level: on a very quiet floor the
+        // speech tail and room reverb sit above floor x factor and never read as silence.
+        val quiet = maxOf(quietLevel() * SILENCE_TIMES, quietLevel() + SILENCE_STEP, ABS_QUIET)
         if (rms < quiet) {
             learn(rms)
             silenceMs += frameMs
@@ -114,7 +122,7 @@ class UtteranceEndpointer(
         const val MIN_FLOOR = 0.003f
         /** Minimum onset level, also used before any floor is learned. */
         const val ABS_SPEECH = 0.03f
-        /** Silence while no floor has been learned yet. */
+        /** Frames below this always count as silence once speech was heard. */
         const val ABS_QUIET = 0.02f
         const val ONSET_TIMES = 2.5f
         const val ONSET_STEP = 0.012f

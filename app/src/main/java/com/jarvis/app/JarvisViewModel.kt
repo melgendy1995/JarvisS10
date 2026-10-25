@@ -1258,12 +1258,14 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             VOICE,
             "stt own-capture end pcm=${recording.pcm.size} pcmRms=${rmsInt(recording.pcm)} " +
                 "ms=${recording.ms} reason=${recording.reason} " +
-                "peak=${levelInt(recording.peak)} floor=${levelInt(recording.floor)}",
+                "peak=${levelText(recording.peak)} floor=${levelText(recording.floor)}",
         )
+        if (recording.levels.isNotEmpty()) Log.i(VOICE, "stt own-capture levels=${recording.levels}")
     }
 
-    /** Endpointer level (PcmLevel.rms16 units) as an int x100; -1 when unknown. */
-    private fun levelInt(level: Float): Int = if (level < 0f) -1 else (level * 100f).toInt()
+    /** Endpointer level (PcmLevel.rms16 units) with three decimals; -1 when unknown. */
+    private fun levelText(level: Float): String =
+        if (level < 0f) "-1" else String.format(java.util.Locale.US, "%.3f", level)
 
     private fun routeOwnRecording(
         recording: UtteranceMic.Recording,
@@ -1323,7 +1325,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             null
         }
         val ok = result as? GroqTranscript.Ok
-        val decision = ok?.let { WhisperAcceptPolicy.evaluate(it.text, it.noSpeechProb, it.avgLogprob) }
+        val decision = ok?.let { WhisperAcceptPolicy.evaluate(it.text, it.noSpeechProb, it.avgLogprob, it.language) }
         logWhisperOutcome(ok, decision, timedOut)
         if (!debug && (!coroutineContext.isActive || gen != generation)) return
         if (ok == null) {

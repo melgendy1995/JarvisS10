@@ -128,4 +128,27 @@ class UtteranceEndpointerTest {
         assertTrue(end.clearPeak())
         assertEquals(0.028f, end.peakLevel, 1e-6f)
     }
+
+    @Test
+    fun aSpeechTailJustAboveAVeryQuietFloorStillEndsBySilence() {
+        val end = UtteranceEndpointer()
+        repeat(5) { end.onRms(0.005f, frame) }
+        repeat(5) { end.onRms(0.09f, frame) }
+        assertTrue(end.heardSpeech)
+        repeat(8) { assertEquals(UtteranceEndpointer.Decision.CONTINUE, end.onRms(0.016f, frame)) }
+        assertEquals(UtteranceEndpointer.Decision.SILENCE, end.onRms(0.016f, frame))
+    }
+
+    @Test
+    fun replyEchoInsideTheWarmupNeitherTriggersNorCountsAsAPeak() {
+        val end = UtteranceEndpointer(warmupMs = 400)
+        listOf(0.28f, 0.39f, 0.11f, 0.03f).forEach {
+            assertEquals(UtteranceEndpointer.Decision.CONTINUE, end.onRms(it, frame))
+        }
+        assertFalse(end.heardSpeech)
+        var last = UtteranceEndpointer.Decision.CONTINUE
+        repeat(46) { last = end.onRms(0.01f, frame) }
+        assertEquals(UtteranceEndpointer.Decision.NO_SPEECH, last)
+        assertFalse(end.clearPeak())
+    }
 }

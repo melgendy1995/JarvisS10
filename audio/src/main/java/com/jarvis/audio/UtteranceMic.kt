@@ -30,6 +30,8 @@ class UtteranceMic(
         val peak: Float = -1f,
         /** Learned noise floor, PcmLevel.rms16 units; -1 when untrained. */
         val floor: Float = -1f,
+        /** Per-frame level x100, comma-separated, for tuning logs. */
+        val levels: String = "",
     )
 
     private val frameSamples = sampleRate / 10
@@ -59,12 +61,13 @@ class UtteranceMic(
         if (opened == null) {
             return Recording(ByteArray(0), "mic", 0L)
         }
-        val endpointer = UtteranceEndpointer()
+        val endpointer = UtteranceEndpointer(warmupMs = WARMUP_MS)
         val prerollFrames = endpointer.prerollFrames(frameMs)
         val preroll = ArrayDeque<ByteArray>(prerollFrames)
         val utterance = ByteArrayOutputStream()
         // Everything heard before onset, for the clear-peak safety net.
         val waitWindow = ByteArrayOutputStream()
+        val levels = StringBuilder()
         var decision = UtteranceEndpointer.Decision.CAP
         var frames = 0L
         var heard = false
@@ -75,7 +78,10 @@ class UtteranceMic(
                 val read = synchronized(lock) { opened.record.read(frame, 0, frameBytes) }
                 if (read < frameBytes) continue
                 frames++
-                decision = endpointer.onRms(PcmLevel.rms16(frame), frameMs)
+                val level = PcmLevel.rms16(frame)
+                if (levels.isNotEmpty()) levels.append(',')
+                levels.append((level * 100f).toInt())
+                decision = endpointer.onRms(level, frameMs)
                 if (!heard) waitWindow.write(frame)
                 if (!heard && decision == UtteranceEndpointer.Decision.CONTINUE) {
                     preroll.addLast(frame)
@@ -101,7 +107,7 @@ class UtteranceMic(
         val peak = endpointer.peakLevel
         val floor = endpointer.floorLevel
         if (decision == UtteranceEndpointer.Decision.NO_SPEECH && !heard && endpointer.clearPeak()) {
-            return Recording(waitWindow.toByteArray(), REASON_PEAK, frames * frameMs, peak, floor)
+            return Recording(waitWindow.toByteArray(), REASON_PEAK, frames * frameMs, peak, floor, levels.toString())
         }
         val reason = when {
             stopping && decision == UtteranceEndpointer.Decision.CONTINUE -> "cap"
@@ -109,7 +115,7 @@ class UtteranceMic(
             decision == UtteranceEndpointer.Decision.SILENCE -> "silence"
             else -> "cap"
         }
-        return Recording(utterance.toByteArray(), reason, frames * frameMs, peak, floor)
+        return Recording(utterance.toByteArray(), reason, frames * frameMs, peak, floor, levels.toString())
     }
 
     private class Opened(
@@ -178,5 +184,8 @@ class UtteranceMic(
     companion object {
         /** No onset, but a clear peak: the whole wait window goes to Whisper. */
         const val REASON_PEAK = "no-onset-peak"
+
+        /** Reply or chime echo seen on the S10 in the first ~300 ms of a capture. */
+        const val WARMUP_MS = 400L
     }
 }

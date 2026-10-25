@@ -77,4 +77,14 @@ class WhisperAcceptPolicyTest {
         // The word pattern must not eat longer real questions.
         assertTrue(WhisperAcceptPolicy.evaluate("thank you very much for the last answer", -1f, -1f).accepted)
     }
+
+    @Test
+    fun otherLanguagesOrScriptsAreRejected() {
+        assertEquals("language", WhisperAcceptPolicy.evaluate("はい", 0.1f, -0.5f, "Japanese").reason)
+        assertEquals("language", WhisperAcceptPolicy.evaluate("はい", 0.1f, -0.5f, null).reason)
+        assertTrue(WhisperAcceptPolicy.evaluate("what time is it", 0.1f, -0.3f, "English").accepted)
+        assertTrue(WhisperAcceptPolicy.evaluate("كم الساعة الآن", 0.1f, -0.3f, "Arabic").accepted)
+        assertTrue(WhisperAcceptPolicy.evaluate("كم الساعة", 0.1f, -0.3f, "ar").accepted)
+        assertFalse(WhisperAcceptPolicy.supportedLanguage("French"))
+    }
 }
