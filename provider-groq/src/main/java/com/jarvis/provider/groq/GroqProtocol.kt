@@ -212,11 +212,7 @@ object GroqProtocol {
         val segments = root["segments"] as? JsonArray ?: return GroqTranscript.Ok(text, language)
         val noSpeech = segments.meanOf("no_speech_prob")
         val logProb = segments.meanOf("avg_logprob")
-        val confidence = if (noSpeech == null) {
-            -1f
-        } else {
-            (1f - noSpeech).coerceIn(0f, 1f)
-        }
+        val confidence = transcriptConfidence(noSpeech, logProb)
         return GroqTranscript.Ok(
             text = text,
             language = language,
@@ -224,6 +220,18 @@ object GroqProtocol {
             avgLogprob = logProb ?: -1f,
             confidence = confidence,
         )
+    }
+
+    /**
+     * 0..1 from verbose_json statistics: exp(mean avg_logprob) scaled by the
+     * speech probability. Clean TTS reads near 1-no_speech alone, so the log
+     * probability is what separates clear speech from guesswork. -1 when absent.
+     */
+    fun transcriptConfidence(noSpeech: Float?, avgLogprob: Float?): Float {
+        if (noSpeech == null && avgLogprob == null) return -1f
+        val speech = (1f - (noSpeech ?: 0f)).coerceIn(0f, 1f)
+        val tokens = if (avgLogprob == null) 1f else kotlin.math.exp(avgLogprob.toDouble()).toFloat()
+        return (speech * tokens).coerceIn(0f, 1f)
     }
 
     private fun JsonArray.meanOf(field: String): Float? {

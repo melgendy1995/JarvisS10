@@ -17,7 +17,7 @@ class UtteranceEndpointer(
     private val noSpeechTimeoutMs: Long = 5_000,
     private val silenceHoldMs: Long = 900,
     private val maxUtteranceMs: Long = 8_000,
-    private val speechHoldMs: Long = 160,
+    private val speechHoldMs: Long = 120,
     private val prerollMs: Long = 300,
 ) {
     private var elapsedMs = 0L
@@ -26,7 +26,24 @@ class UtteranceEndpointer(
     private var floor = -1f
     private var heard = false
 
+    private var peak = 0f
+
     val heardSpeech: Boolean get() = heard
+
+    /** Loudest frame so far, in PcmLevel.rms16 units. */
+    val peakLevel: Float get() = peak
+
+    /** Learned noise floor, or -1 when no quiet frame has been seen yet. */
+    val floorLevel: Float get() = floor
+
+    /**
+     * No onset, but the wait window held a clear peak above the floor: worth one
+     * Whisper pass, whose confidence gate rejects plain noise.
+     */
+    fun clearPeak(): Boolean {
+        val base = if (floor < 0f) MIN_FLOOR else floor
+        return peak >= maxOf(PEAK_MIN, base * PEAK_TIMES)
+    }
 
     enum class Decision {
         CONTINUE,
@@ -44,6 +61,7 @@ class UtteranceEndpointer(
     /** [rms] is the 0..1 frame level from PcmLevel.rms16; [frameMs] the frame duration. */
     fun onRms(rms: Float, frameMs: Long): Decision {
         elapsedMs += frameMs
+        if (rms > peak) peak = rms
         if (!heard) {
             if (rms >= onsetThreshold()) {
                 speechMs += frameMs
@@ -89,14 +107,21 @@ class UtteranceEndpointer(
     }
 
     private companion object {
-        const val MIN_FLOOR = 0.005f
-        /** Speech at the very first frame still reads as onset. */
-        const val ABS_SPEECH = 0.12f
+        // Levels are PcmLevel.rms16 units (raw RMS x3). On the S10 VOICE_RECOGNITION
+        // mic with AEC/NS a quiet room sits near 0.01-0.02 and speech at 1-2 m
+        // near 0.04-0.15, so onset is the adaptive floor times a factor with a
+        // low absolute minimum.
+        const val MIN_FLOOR = 0.003f
+        /** Minimum onset level, also used before any floor is learned. */
+        const val ABS_SPEECH = 0.03f
         /** Silence while no floor has been learned yet. */
-        const val ABS_QUIET = 0.1f
+        const val ABS_QUIET = 0.02f
         const val ONSET_TIMES = 2.5f
-        const val ONSET_STEP = 0.06f
-        const val SILENCE_TIMES = 2.0f
-        const val SILENCE_STEP = 0.03f
+        const val ONSET_STEP = 0.012f
+        const val SILENCE_TIMES = 1.8f
+        const val SILENCE_STEP = 0.006f
+        /** A wait-window peak this loud (and [PEAK_TIMES] over the floor) still goes to Whisper. */
+        const val PEAK_MIN = 0.025f
+        const val PEAK_TIMES = 2.0f
     }
 }

@@ -36,6 +36,7 @@ import kotlinx.coroutines.launch
  * Start one real-mic listen turn exactly like a tap or wake handover
  * (own capture in ar/auto), then give it something to recognice:
  * adb shell am broadcast -a com.jarvis.app.DEBUG_LISTEN
+ * adb shell am broadcast -a com.jarvis.app.DEBUG_TTS_VOICES
  *
  * Force the shelf orb for screenshots:
  * adb shell am broadcast -a com.jarvis.app.DEBUG_STATE -p com.jarvis.app --es state idle
@@ -81,6 +82,16 @@ class DebugAskReceiver : BroadcastReceiver() {
         }
         if (intent.action == STT_FILE_ACTION) {
             runSttFile(context, intent)
+            return
+        }
+        if (intent.action == TTS_VOICES_ACTION) {
+            val app = context.applicationContext as? JarvisApplication
+            if (app == null) {
+                Log.w(TAG, "application is not ready")
+                return
+            }
+            Log.i(TAG, "debug tts voices")
+            app.debugTtsVoices()
             return
         }
         if (intent.action == LISTEN_ACTION) {
@@ -273,6 +284,7 @@ class DebugAskReceiver : BroadcastReceiver() {
         const val VOICE_LANG_ACTION = "com.jarvis.app.DEBUG_VOICE_LANG"
         const val STT_FILE_ACTION = "com.jarvis.app.DEBUG_STT_FILE"
         const val LISTEN_ACTION = "com.jarvis.app.DEBUG_LISTEN"
+        const val TTS_VOICES_ACTION = "com.jarvis.app.DEBUG_TTS_VOICES"
         const val CAMERA_PASSWORD_ACTION = "com.jarvis.app.DEBUG_CAMERA_PASSWORD"
         const val CAMERA_ACTION = "com.jarvis.app.DEBUG_CAMERA"
         const val TAG = "JarvisDebug"

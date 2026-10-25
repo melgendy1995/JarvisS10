@@ -112,6 +112,14 @@ class JarvisSpeaker(context: Context) {
         }
     }
 
+    /** Debug: logs every voice the active engine lists. */
+    fun logVoices() {
+        main.post {
+            val engine = tts
+            if (engine == null) Log.w(JarvisTts.TAG, "tts voices engine not ready") else JarvisTts.logAllVoices(engine)
+        }
+    }
+
     fun stop() {
         main.post {
             runCatching { tts?.stop() }
@@ -138,9 +146,7 @@ class JarvisSpeaker(context: Context) {
         activeBrain = brainId
         val arabic = text.any { it in '\u0600'..'\u06FF' }
         if (arabic) {
-            tts.language = Locale.forLanguageTag("ar")
-            tts.setPitch(1.0f)
-            tts.setSpeechRate(1.02f)
+            JarvisTts.applyArabic(tts)
         } else {
             JarvisTts.applyEnglish(tts)
         }

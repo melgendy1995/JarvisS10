@@ -11,6 +11,7 @@
                 <action android:name="com.jarvis.app.DEBUG_VOICE_LANG" />
                 <action android:name="com.jarvis.app.DEBUG_STT_FILE" />
                 <action android:name="com.jarvis.app.DEBUG_LISTEN" />
+                <action android:name="com.jarvis.app.DEBUG_TTS_VOICES" />
                 <action android:name="com.jarvis.app.DEBUG_CAMERA_PASSWORD" />
                 <action android:name="com.jarvis.app.DEBUG_CAMERA" />
             </intent-filter>

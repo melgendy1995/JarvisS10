@@ -279,6 +279,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         app.onVoiceUtterance = { text -> onRecognizedUtterance(text) }
         app.onWhisperPrimaryUtterance = { pcm -> debugWhisperPrimary(pcm) }
         app.onDebugListen = { debugListen() }
+        app.onDebugTtsVoices = { speaker.logVoices() }
         Log.i(VOICE, "voice loop ready")
         // The shelf address text follows Wi-Fi changes a little slowly on purpose: ~30 s.
         viewModelScope.launch {
@@ -1256,9 +1257,13 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         Log.i(
             VOICE,
             "stt own-capture end pcm=${recording.pcm.size} pcmRms=${rmsInt(recording.pcm)} " +
-                "ms=${recording.ms} reason=${recording.reason}",
+                "ms=${recording.ms} reason=${recording.reason} " +
+                "peak=${levelInt(recording.peak)} floor=${levelInt(recording.floor)}",
         )
     }
+
+    /** Endpointer level (PcmLevel.rms16 units) as an int x100; -1 when unknown. */
+    private fun levelInt(level: Float): Int = if (level < 0f) -1 else (level * 100f).toInt()
 
     private fun routeOwnRecording(
         recording: UtteranceMic.Recording,
@@ -1348,7 +1353,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 deliver(text, handsFreeTurn = handsFreeTurn)
             }
         } else {
-            val detectedArabic = ok.language?.startsWith("ar") == true ||
+            val detectedArabic = ok.language?.lowercase()?.startsWith("ar") == true ||
                 ArabicRecheckPolicy.hasArabic(ok.text)
             speakOwnRetry(pinnedArabic || detectedArabic)
         }
@@ -1642,6 +1647,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         app.onVoiceUtterance = null
         app.onWhisperPrimaryUtterance = null
         app.onDebugListen = null
+        app.onDebugTtsVoices = null
         utteranceJob?.cancel()
         stopOwnCapture()
         if (captureOpen) utteranceMic.stop()

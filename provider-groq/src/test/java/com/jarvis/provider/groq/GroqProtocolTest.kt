@@ -201,7 +201,17 @@ class GroqProtocolTest {
         assertEquals("ar", ok.language)
         assertEquals(0.15f, ok.noSpeechProb, 1e-4f)
         assertEquals(-0.5f, ok.avgLogprob, 1e-4f)
-        assertEquals(0.85f, ok.confidence, 1e-4f)
+        // (1 - 0.15) * exp(-0.5)
+        assertEquals(0.5155f, ok.confidence, 1e-3f)
+    }
+
+    @Test
+    fun confidenceTracksLogProbabilityNotJustSpeechProbability() {
+        val clear = GroqProtocol.transcriptConfidence(1e-10f, -0.05f)
+        val guess = GroqProtocol.transcriptConfidence(1e-10f, -1.2f)
+        assertEquals(0.951f, clear, 1e-3f)
+        assertEquals(0.301f, guess, 1e-3f)
+        assertEquals(-1f, GroqProtocol.transcriptConfidence(null, null))
     }
 
     @Test

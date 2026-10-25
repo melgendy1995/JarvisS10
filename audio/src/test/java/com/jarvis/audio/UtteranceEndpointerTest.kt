@@ -95,4 +95,37 @@ class UtteranceEndpointerTest {
         assertEquals(UtteranceEndpointer.Decision.NO_SPEECH, end.onRms(0.01f, frame))
         assertFalse(end.heardSpeech)
     }
+
+    @Test
+    fun realisticS10SpeechOverARoomFloorTriggersAndEndsBySilence() {
+        val end = UtteranceEndpointer()
+        repeat(5) { assertEquals(UtteranceEndpointer.Decision.CONTINUE, end.onRms(0.012f, frame)) }
+        assertFalse(end.heardSpeech)
+        listOf(0.05f, 0.07f, 0.04f, 0.08f, 0.06f).forEach {
+            assertEquals(UtteranceEndpointer.Decision.CONTINUE, end.onRms(it, frame))
+        }
+        assertTrue(end.heardSpeech)
+        repeat(8) { assertEquals(UtteranceEndpointer.Decision.CONTINUE, end.onRms(0.013f, frame)) }
+        assertEquals(UtteranceEndpointer.Decision.SILENCE, end.onRms(0.013f, frame))
+    }
+
+    @Test
+    fun aSteadyRoomFloorIsNoSpeechWithoutAClearPeak() {
+        val end = UtteranceEndpointer()
+        var last = UtteranceEndpointer.Decision.CONTINUE
+        repeat(50) { last = end.onRms(0.015f, frame) }
+        assertEquals(UtteranceEndpointer.Decision.NO_SPEECH, last)
+        assertFalse(end.heardSpeech)
+        assertFalse(end.clearPeak())
+    }
+
+    @Test
+    fun aQuietButClearPeakWithoutOnsetIsFlaggedForWhisper() {
+        val end = UtteranceEndpointer()
+        var last = UtteranceEndpointer.Decision.CONTINUE
+        repeat(50) { i -> last = end.onRms(if (i == 20) 0.028f else 0.008f, frame) }
+        assertEquals(UtteranceEndpointer.Decision.NO_SPEECH, last)
+        assertTrue(end.clearPeak())
+        assertEquals(0.028f, end.peakLevel, 1e-6f)
+    }
 }

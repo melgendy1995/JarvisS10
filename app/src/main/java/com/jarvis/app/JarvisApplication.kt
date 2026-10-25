@@ -119,6 +119,7 @@ class JarvisApplication : Application() {
     /** One real-mic listen turn exactly like a tap or wake handover, for adb tests. */
     @Volatile
     var onDebugListen: (() -> Unit)? = null
+    var onDebugTtsVoices: (() -> Unit)? = null
 
     /** Same entry the recognizer uses, including speech. Logs and returns when the activity is down. */
     suspend fun runVoiceUtterance(text: String) {
@@ -144,6 +145,15 @@ class JarvisApplication : Application() {
 
     fun debugListen() {
         val handler = onDebugListen
+        if (handler == null) {
+            Log.w("JarvisVoice", "voice loop is not running")
+            return
+        }
+        handler()
+    }
+
+    fun debugTtsVoices() {
+        val handler = onDebugTtsVoices
         if (handler == null) {
             Log.w("JarvisVoice", "voice loop is not running")
             return
