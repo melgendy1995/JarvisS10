@@ -88,7 +88,11 @@ class AndroidAppControl(context: Context) : AppControl {
             return SkillResult(missingTarget(target, arabic), success = false)
         }
         if (named != null && named != AppMatcher.YOUTUBE) {
-            if (directPlay(named, query)) {
+            val directStarted = directPlay(named, query)
+            if (named == AppMatcher.YOUTUBE_MUSIC) {
+                return playOnYouTubeMusic(query, arabic, directStarted)
+            }
+            if (directStarted) {
                 playback.keepPlaying(named)
                 return SkillResult(if (arabic) "شغال." else "Playing.")
             }
@@ -115,6 +119,86 @@ class AndroidAppControl(context: Context) : AppControl {
             if (arabic) "ما لقيت تطبيق يشغل ده." else "I can't find an app that plays that.",
             success = false,
         )
+    }
+
+    private suspend fun playOnYouTubeMusic(query: String, arabic: Boolean, directStarted: Boolean): SkillResult {
+        var tapStarted = false
+        if (!directStarted && openYouTubeMusicSearch(query)) {
+            Log.i(TAG, "ytm search opened")
+            val service = awaitYouTubeService()
+            if (service == null) {
+                Log.i(TAG, "ytm accessibility missing, tapping skipped")
+            } else {
+                tapStarted = tapYouTubeMusicResult(service)
+            }
+        }
+        val youtubeAvailable = youtubeInstalled()
+        var youtubeStarted = false
+        if (!directStarted && !tapStarted && youtubeAvailable) {
+            youtubeStarted = playOnYouTube(query, arabic).success
+        }
+        val outcome = YouTubeMusicRouting.outcome(directStarted, tapStarted, youtubeAvailable, youtubeStarted)
+        if (outcome == MusicPlayOutcome.PLAYING_ON_YT_MUSIC) {
+            playback.keepPlaying(AppMatcher.YOUTUBE_MUSIC)
+        }
+        return SkillResult(YouTubeMusicRouting.message(outcome, arabic), success = outcome != MusicPlayOutcome.FAILED)
+    }
+
+    private suspend fun openYouTubeMusicSearch(query: String): Boolean {
+        val uri = Uri.parse("https://music.youtube.com/search?q=${Uri.encode(query)}")
+        val view = Intent(Intent.ACTION_VIEW, uri).apply {
+            setPackage(AppMatcher.YOUTUBE_MUSIC)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        if (resolves(view)) return startExternal(AppMatcher.YOUTUBE_MUSIC, view)
+        val search = Intent(Intent.ACTION_SEARCH).apply {
+            setPackage(AppMatcher.YOUTUBE_MUSIC)
+            putExtra(android.app.SearchManager.QUERY, query)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        if (!resolves(search)) return false
+        return startExternal(AppMatcher.YOUTUBE_MUSIC, search)
+    }
+
+    private suspend fun tapYouTubeMusicResult(service: JarvisAccessibilityService): Boolean {
+        Log.i(TAG, "ytm screen ${service.screenWidth()}x${service.screenHeight()} enabled=${JarvisAccessibilityService.isEnabled(appContext)}")
+        for (attempt in 0 until 3) {
+            if (attempt == 0 && !awaitYouTubeMusicResults(service)) {
+                Log.i(TAG, "ytm results did not appear")
+                return false
+            }
+            if (attempt > 0) delay(800)
+            val nodes = service.snapshot()
+            val pick = YouTubeMusicResultPicker.bestPlayable(nodes)
+            if (pick == null) {
+                Log.i(TAG, "ytm no tappable result (attempt $attempt)")
+                continue
+            }
+            val label = pick.desc.ifBlank { pick.text }.trim()
+            Log.i(TAG, "ytm tap \"$label\"")
+            service.tap(pick)
+            delay(1_500)
+            if (awaitStarted(AppMatcher.YOUTUBE_MUSIC, 4_000)) {
+                Log.i(TAG, "ytm started=true")
+                return true
+            }
+            Log.i(TAG, "ytm started=false, media key backup")
+            playback.dispatch(KeyEvent.KEYCODE_MEDIA_PLAY)
+            if (awaitStarted(AppMatcher.YOUTUBE_MUSIC, 4_000)) {
+                Log.i(TAG, "ytm started=true (media key)")
+                return true
+            }
+        }
+        Log.i(TAG, "ytm tap failed")
+        return false
+    }
+
+    private suspend fun awaitYouTubeMusicResults(service: JarvisAccessibilityService): Boolean {
+        repeat(20) {
+            if (YouTubeMusicResultPicker.bestPlayable(service.snapshot()) != null) return true
+            delay(300)
+        }
+        return false
     }
 
     private suspend fun playOnYouTube(query: String, arabic: Boolean): SkillResult {

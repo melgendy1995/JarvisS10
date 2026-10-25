@@ -17,8 +17,9 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
 /**
- * Scoped to YouTube. Taps the first real search result, the skip-ad button,
- * and the in-player pause, play, and next controls when they are on screen.
+ * Scoped to the packages in jarvis_accessibility_service.xml: YouTube and
+ * YouTube Music. Taps the first real search result, the skip-ad button, and
+ * the in-player pause, play, and next controls when they are on screen.
  */
 class JarvisAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
