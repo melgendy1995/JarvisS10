@@ -101,18 +101,26 @@ elif [[ $PIN -eq 1 ]]; then
   if [[ "${keyguard:-0}" -gt 0 ]]; then
     echo "WARNING: the phone is locked. Unlock it by hand; install.sh never unlocks a phone."
   fi
-  task_id=$(adb_cmd shell am stack list 2>/dev/null | tr -d '\r' | grep "$PKG/.MainActivity" | grep -o 'taskId=[0-9]*' | head -1 | cut -d= -f2)
+  # Match both "com.jarvis.app/com.jarvis.app.MainActivity" and
+  # "com.jarvis.app/.MainActivity"; grep may find nothing, so never let its
+  # status abort the script under set -euo pipefail.
+  task_id=$(adb_cmd shell am stack list 2>/dev/null | tr -d '\r' | grep -E "${PKG}/(${PKG}\.MainActivity|\.MainActivity)" | grep -o 'taskId=[0-9]*' | head -1 | cut -d= -f2 || true)
   if [[ -z "$task_id" ]]; then
-    task_id=$(adb_cmd shell dumpsys activity activities 2>/dev/null | tr -d '\r' | grep "$PKG/.MainActivity" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+    task_id=$(adb_cmd shell dumpsys activity activities 2>/dev/null | tr -d '\r' | grep -oE "Task\\{[^ ]+ #[0-9]+ .*A=[0-9]+:${PKG}" | grep -oE '#[0-9]+' | head -1 | tr -d '#' || true)
   fi
   if [[ -n "$task_id" ]]; then
     if ! adb_cmd shell am task lock "$task_id" 2>/dev/null; then
-      adb_cmd shell cmd activity task lock "$task_id"
+      adb_cmd shell cmd activity task lock "$task_id" 2>/dev/null || true
+    fi
+    sleep 1
+    lock_out=$(adb_cmd shell dumpsys activity activities 2>/dev/null | tr -d '\r' | grep "mLockTaskModeState" || true)
+    echo "${lock_out:-mLockTaskModeState=unknown}"
+    if [[ "${lock_out}" == *NONE* ]]; then
+      echo "WARNING: lock task state is still NONE after pinning task $task_id."
     fi
   else
     echo "WARNING: no Jarvis task found, so the task was not pinned."
   fi
-  adb_cmd shell dumpsys activity activities 2>/dev/null | grep mLockTaskModeState || true
 else
   echo "Pinning skipped (--no-pin)."
 fi
@@ -120,14 +128,19 @@ fi
 pid=$(adb_cmd shell pidof "$PKG" 2>/dev/null | tr -d '\r')
 access_ok=$(adb_cmd shell settings get secure accessibility_enabled 2>/dev/null | tr -d '\r')
 services_now=$(adb_cmd shell settings get secure enabled_accessibility_services 2>/dev/null | tr -d '\r')
-listener_now=$(adb_cmd shell dumpsys notification_policy 2>/dev/null | tr -d '\r' | grep -c "$LISTENER" || true)
-lock_state=$(adb_cmd shell dumpsys activity activities 2>/dev/null | grep "mLockTaskModeState" | tr -d '\r' | head -1 || true)
+listener_now=$(adb_cmd shell dumpsys notification 2>/dev/null | grep -c "JarvisMediaListener" || true)
+listener_setting=$(adb_cmd shell settings get secure enabled_notification_listeners 2>/dev/null | tr -d '\r' || true)
+lock_state=$(adb_cmd shell dumpsys activity activities 2>/dev/null | tr -d '\r' | grep "mLockTaskModeState" | head -1 || true)
 
 echo "----- status -----"
 echo "serial=$SERIAL"
 echo "pid=${pid:-none}"
 echo "accessibility_enabled=${access_ok:-null}"
 echo "accessibility_service_set=$(echo "${services_now:-null}" | grep -q "$SVC" && echo yes || echo no)"
-echo "notification_listener=$(echo "${listener_now}" | grep -q 1 && echo yes || echo no)"
+if [[ "${listener_now:-0}" -gt 0 || "${listener_setting:-null}" == *"$PKG"* ]]; then
+  echo "notification_listener=yes"
+else
+  echo "notification_listener=no"
+fi
 echo "${lock_state:-lockTaskModeState=unknown}"
 echo "------------------"
