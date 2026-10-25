@@ -18,6 +18,39 @@ sealed interface MediaAccess {
 }
 
 /**
+ * Pure stop policy for the auto-started camera. Only an authenticated viewer
+ * request (the HTTP server checks the password before [MediaAccess] is ever
+ * asked) or a voice "camera on" starts or extends the camera; and the camera
+ * the class started itself stops again on its own, either DEPART_GRACE_MILLIS
+ * after the last sticky viewer left (nothing else joined the shelf), or after
+ * the idle timeout for a snapshot-style audience.
+ */
+internal object CameraStopPolicy {
+    const val REASON_IDLE = "idle"
+    const val REASON_NO_VIEWERS = "no-viewers"
+
+    /**
+     * Why the auto-started camera should stop now, or null to keep running.
+     * [departGraceExpired] means the last sticky viewer (WebRTC or /stream)
+     * departed and the reconnect grace is spent with an empty shelf: stop on
+     * the grace alone, not with the idle timeout stacked on top of it.
+     */
+    fun stopReason(
+        running: Boolean,
+        autoStarted: Boolean,
+        starting: Boolean,
+        departGraceExpired: Boolean,
+        idleMillis: Long?,
+        idleTimeoutMillis: Long,
+    ): String? {
+        if (!running || !autoStarted || starting) return null
+        if (departGraceExpired && idleMillis != null) return REASON_NO_VIEWERS
+        if (idleMillis != null && idleMillis >= idleTimeoutMillis) return REASON_IDLE
+        return null
+    }
+}
+
+/**
  * Backing hooks for [CameraHttpServer]. The app-lifetime [CameraOnDemand]
  * implements it so the server stays a free-standing piece.
  */
@@ -40,9 +73,11 @@ internal interface CameraOnDemandHooks {
 /**
  * Always-on HTTP host plus camera auto-start for the on-demand feed. The server
  * binds at app start and retries while the port is busy. An authenticated media
- * request starts the camera unattended; once no viewers remain for the idle
- * window, only a camera this class auto-started is stopped again. Voice control
- * keeps the stock behaviour: a camera the user turned on never stops alone.
+ * request starts the camera unattended; once the shelf is empty — the depart
+ * grace after the last sticky viewer, or the idle window for a snapshot
+ * audience — only a camera this class auto-started is stopped again, with the
+ * reason logged. Voice control keeps the stock behaviour: a camera the user
+ * turned on never stops alone.
  */
 internal class CameraOnDemand(
     private val context: Context,
@@ -180,8 +215,8 @@ internal class CameraOnDemand(
             }
             if (server == null) {
                 val http = CameraHttpServer(
-                    context = context,
                     port = port,
+                    viewerHtml = { viewerResource() },
                     password = password,
                     hub = hub,
                     answerer = { offer -> CameraStreamService.webrtcAnswer(offer) },
@@ -199,14 +234,31 @@ internal class CameraOnDemand(
 
     private suspend fun monitorLoop() {
         while (true) {
-            if (!CameraStreamService.running) {
+            val running = CameraStreamService.running
+            if (!running) {
                 autoStarted = false
             } else if (autoStarted && !starting.get()) {
-                val idle = watch.idleMillis()
-                if (idle != null && idle >= IDLE_MILLIS) launchStop()
+                val reason = CameraStopPolicy.stopReason(
+                    running = true,
+                    autoStarted = true,
+                    starting = false,
+                    departGraceExpired = watch.departGraceExpired(),
+                    idleMillis = watch.idleMillis(),
+                    idleTimeoutMillis = IDLE_MILLIS,
+                )
+                if (reason != null) {
+                    Log.i(TAG, "camera stop reason=$reason")
+                    launchStop()
+                }
             }
             delay(MONITOR_MILLIS)
         }
+    }
+
+    private fun viewerResource(): String {
+        return context.resources.openRawResource(com.jarvis.app.R.raw.camera_viewer)
+            .bufferedReader()
+            .use { it.readText() }
     }
 
     private companion object {

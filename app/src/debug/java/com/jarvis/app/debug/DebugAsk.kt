@@ -37,6 +37,11 @@ import kotlinx.coroutines.launch
  * Force the shelf orb for screenshots:
  * adb shell am broadcast -a com.jarvis.app.DEBUG_STATE -p com.jarvis.app --es state idle
  * state is idle, listening, thinking, speaking, or error.
+ *
+ * Camera toggle for stress loops, the same path as the voice camera on/off:
+ * adb shell am broadcast -a com.jarvis.app.DEBUG_CAMERA --es op start
+ * adb shell am broadcast -a com.jarvis.app.DEBUG_CAMERA --es op stop
+ * op is start/on, stop/off, or switch; start|stop are aliases for on|off.
  */
 object GeminiDebug {
     @Volatile
@@ -149,14 +154,20 @@ class DebugAskReceiver : BroadcastReceiver() {
 
     private fun runCamera(context: Context, intent: Intent) {
         val op = intent.getStringExtra("op")?.trim().orEmpty()
-        if (op != "on" && op != "off" && op != "switch") {
+        val mapped = when (op) {
+            "on", "start" -> "on"
+            "off", "stop" -> "off"
+            "switch" -> "switch"
+            else -> null
+        }
+        if (mapped == null) {
             Log.w(TAG, "camera op rejected")
             return
         }
         val pending = goAsync()
         askScope.launch {
             try {
-                val outcome = when (op) {
+                val outcome = when (mapped) {
                     "on" -> CameraStreamService.start(context)
                     "off" -> CameraStreamService.stop(context)
                     else -> CameraStreamService.switch(context)

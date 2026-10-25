@@ -1,6 +1,5 @@
 package com.jarvis.app.system
 
-import android.content.Context
 import android.util.Log
 import com.jarvis.core.camera.JsonText
 import com.jarvis.core.camera.basicPassword
@@ -26,16 +25,14 @@ import java.util.LinkedHashSet
  * placeholder error while the camera is coming up.
  */
 internal class CameraHttpServer(
-    context: Context,
     private val port: Int,
+    private val viewerHtml: () -> String,
     private val password: () -> String,
     private val hub: FrameHub,
     private val answerer: (String) -> String?,
     private val onDemand: CameraOnDemandHooks,
 ) : NanoHTTPD("0.0.0.0", port) {
-    private val viewer = context.resources.openRawResource(com.jarvis.app.R.raw.camera_viewer)
-        .bufferedReader()
-        .use { it.readText() }
+    private val viewer by lazy { viewerHtml() }
     private val sessions = Collections.synchronizedSet(LinkedHashSet<String>())
     private val random = SecureRandom()
 
@@ -53,6 +50,10 @@ internal class CameraHttpServer(
     override fun useGzipWhenAccepted(response: Response): Boolean = false
 
     override fun serve(session: IHTTPSession): Response {
+        // Auth first: every hook that can start or extend the camera
+        // (mediaAccess, viewer tracking) is only reachable behind [authorized],
+        // so an unauthenticated request is 401 and never starts or extends the
+        // camera.
         val method = session.method
         val path = session.uri ?: "/"
         if (method == Method.POST && path == "/login") return login(session)

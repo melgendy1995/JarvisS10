@@ -49,6 +49,12 @@ android {
             pickFirsts += "lib/arm64-v8a/libc++_shared.so"
         }
     }
+
+    // Pure-JVM tests touch code that logs (android.util.Log); return defaults
+    // instead of "not mocked" so the camera server auth ordering stays testable.
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 kotlin {

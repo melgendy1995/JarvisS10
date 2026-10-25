@@ -51,6 +51,17 @@ internal class WebRtcPublisher(context: Context) {
     private var videoSource: VideoSource? = null
     private var videoTrack: VideoTrack? = null
 
+    /**
+     * Set before any teardown starts: the frame callback checks this first and
+     * silently drops frames in flight, so none can reach a disposed VideoSource
+     * on the helper thread (the FORTIFY SIGABRT path). Frames are owned by the
+     * helper; they are dropped, never released, from the callback.
+     */
+    private val frameGate = AtomicBoolean(false)
+
+    /** Guards the one-shot teardown, so a second dispose() is a no-op. */
+    private val disposed = AtomicBoolean(false)
+
     /** Peer count for the camera auto-shutdown; only set ever gets one assignment before peers exist. */
     @Volatile
     var onPeersChanged: ((Int) -> Unit)? = null
@@ -81,6 +92,7 @@ internal class WebRtcPublisher(context: Context) {
 
     fun adapt(profile: CameraProfile) {
         executor.execute {
+            if (disposed.get()) return@execute
             videoSource?.adaptOutputFormat(profile.width, profile.height, profile.fpsMax)
         }
     }
@@ -91,6 +103,13 @@ internal class WebRtcPublisher(context: Context) {
     }
 
     fun answer(offerSdp: String): String? {
+        // A disposed publisher is never reused: the camera service makes a
+        // fresh one per camera start, so an offer arriving after teardown is
+        // rejected here without touching any native object.
+        if (disposed.get()) {
+            Log.i(TAG, "webrtc answer rejected: publisher disposed")
+            return null
+        }
         val future = CompletableFuture<String?>()
         executor.execute {
             try {
@@ -111,29 +130,49 @@ internal class WebRtcPublisher(context: Context) {
     }
 
     fun dispose() {
+        // One-shot: the first call owns every teardown step, a second call
+        // returns without touching anything native.
+        if (!disposed.compareAndSet(false, true)) return
+        // Gate the frame callback before anything native is touched, so no
+        // frame from the helper thread can reach source once it is disposed.
+        frameGate.set(true)
         val done = CompletableFuture<Unit>()
-        executor.execute {
-            peers.forEach { peer -> runCatching { peer.close() } }
-            peers.forEach { peer -> runCatching { peer.dispose() } }
-            peers.clear()
-            notifyPeers()
-            runCatching { videoTrack?.dispose() }
-            runCatching { videoSource?.dispose() }
-            runCatching { helper?.stopListening() }
-            runCatching { helper?.dispose() }
-            runCatching { factory?.dispose() }
-            runCatching { audioModule?.release() }
-            runCatching { eglBase?.release() }
-            videoTrack = null
-            videoSource = null
-            helper = null
-            factory = null
-            audioModule = null
-            eglBase = null
-            done.complete(Unit)
+        try {
+            executor.execute {
+                // The caller unbinds the CameraX preview (CameraStreamService
+                // closes its engine) before this, so no new surface work lands.
+                val telemetry: (String) -> Unit = { line -> Log.i(TAG, line) }
+                TeardownSequence("webrtc", telemetry).run(
+                    "preview-release" to { surfaceProvider = null },
+                    "capturer-stop" to { videoSource?.capturerObserver?.onCapturerStopped() },
+                    // Blocks on the helper thread: afterwards no frame callback
+                    // is running and none can start, so the drops below are safe.
+                    "helper-stop-listening" to { helper?.stopListening() },
+                    "peers-close-dispose" to {
+                        peers.forEach { peer -> runCatching { peer.close() } }
+                        peers.forEach { peer -> runCatching { peer.dispose() } }
+                        peers.clear()
+                        notifyPeers()
+                    },
+                    "helper-dispose" to { helper?.dispose() },
+                    "video-track-dispose" to { videoTrack?.dispose() },
+                    "video-source-dispose" to { videoSource?.dispose() },
+                    "factory-dispose" to { factory?.dispose() },
+                    "audio-release" to { audioModule?.release() },
+                    "egl-release" to { eglBase?.release() },
+                )
+                videoTrack = null
+                videoSource = null
+                helper = null
+                factory = null
+                audioModule = null
+                eglBase = null
+                done.complete(Unit)
+            }
+            runCatching { done.get(5, TimeUnit.SECONDS) }
+        } finally {
+            executor.shutdownNow()
         }
-        runCatching { done.get(2, TimeUnit.SECONDS) }
-        executor.shutdownNow()
     }
 
     private fun initOnThread() {
@@ -162,6 +201,12 @@ internal class WebRtcPublisher(context: Context) {
         videoSource = source
         source.capturerObserver.onCapturerStarted(true)
         capture.startListening { frame ->
+            if (frameGate.get()) {
+                // Teardown ran (or is running): the source below may already be
+                // disposed. Drop the frame — the helper owns it — and never
+                // release it from here.
+                return@startListening
+            }
             source.capturerObserver.onFrameCaptured(frame)
         }
         val track = created.createVideoTrack("jarvis-camera", source)
@@ -192,6 +237,7 @@ internal class WebRtcPublisher(context: Context) {
     }
 
     private fun answerOnThread(offerSdp: String): String? {
+        if (disposed.get()) return null
         val created = factory ?: return null
         val track = videoTrack ?: return null
         val normalized = normalizeSdp(offerSdp)

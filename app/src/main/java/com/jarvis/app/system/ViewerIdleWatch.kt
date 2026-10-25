@@ -69,6 +69,20 @@ internal class ViewerIdleWatch(
         return (idleMillis(atMillis) ?: return false) >= idleTimeoutMillis
     }
 
+    /**
+     * True once the shelf is empty because the last sticky viewer (WebRTC peer
+     * or /stream connection) left and the depart grace window is spent with no
+     * other viewer present. The camera auto-stop uses this to stop on the
+     * grace alone instead of stacking the full idle timeout on top of it.
+     */
+    fun departGraceExpired(atMillis: Long = nowMillis()): Boolean {
+        synchronized(this) {
+            purgeExpired(atMillis)
+            if (viewers.isNotEmpty()) return false
+            return graceHoldUntilMillis != 0L && atMillis >= graceHoldUntilMillis
+        }
+    }
+
     private fun purgeExpired(atMillis: Long) {
         val stale = viewers.filterValues { !it.sticky && it.lastHitMillis + idleTimeoutMillis <= atMillis }
         if (stale.isEmpty()) return

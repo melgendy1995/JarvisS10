@@ -161,4 +161,47 @@ class ViewerIdleWatchGraceTest {
         assertEquals(1, watch.activeCount())
         assertNull(watch.idleMillis())
     }
+
+    @Test
+    fun departGraceExpiresOnlyAfterTheWindowIsSpent() {
+        val watch = watch()
+        watch.arrived("webrtc")
+        watch.departed("webrtc")
+        now = 15_000
+        assertTrue(watch.departGraceExpired())
+        now = 14_999
+        assertFalse(watch.departGraceExpired())
+    }
+
+    @Test
+    fun departGraceIsNeverSetForASnapshotOnlyShelf() {
+        val watch = watch()
+        now = 10_000
+        watch.touched("snapshot")
+        now = 60_000
+        // Fresh until 55 s, and the idle window runs from that expiry.
+        assertFalse(watch.departGraceExpired())
+        assertFalse(watch.idleTimedOut())
+        now = 100_000
+        assertTrue(watch.idleTimedOut())
+        assertFalse(watch.departGraceExpired())
+    }
+
+    @Test
+    fun noDepartGraceWhenASnapshotViewerWasStillActiveAtTheDeparture() {
+        val watch = watch()
+        watch.arrived("webrtc")
+        now = 10_000
+        watch.touched("snapshot")
+        now = 20_000
+        watch.departed("webrtc")
+        // Grace is not armed while a viewer remains, and the snapshot expiry at
+        // 55 s starts the plain idle window instead.
+        now = 65_000
+        assertFalse(watch.departGraceExpired())
+        // Idle runs from the 55 s expiry; the stop comes from the idle policy.
+        now = 100_000
+        assertTrue(watch.idleTimedOut())
+        assertFalse(watch.departGraceExpired())
+    }
 }
