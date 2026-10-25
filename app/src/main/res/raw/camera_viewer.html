@@ -8,6 +8,9 @@
   html, body { margin: 0; height: 100%; background: #000; color: #cfe6f5; font-family: sans-serif; }
   img, video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
   #status { position: fixed; left: 16px; bottom: 16px; font-size: 13px; letter-spacing: 0.12em; color: #9fb4c8; }
+  #badge { position: fixed; right: 16px; top: 16px; font-size: 12px; letter-spacing: 0.12em;
+           color: #ffd299; border: 1px solid #7a5a3a; padding: 4px 10px; border-radius: 10px;
+           background: rgba(0,0,0,0.55); }
   .hide { display: none; }
 </style>
 </head>
@@ -16,41 +19,64 @@
 <video id="rtc" class="hide" autoplay playsinline muted></video>
 <img id="mjpeg" class="hide" alt="mjpeg">
 <div id="status">Connecting</div>
+<div id="badge" class="hide">reconnecting…</div>
 <script>
 (function () {
   var still = document.getElementById('still');
   var rtc = document.getElementById('rtc');
   var mjpeg = document.getElementById('mjpeg');
   var status = document.getElementById('status');
-  var live = false;
-  var alive = false;
+  var badge = document.getElementById('badge');
+  var live = false;        // a live WebRTC video is showing
+  var reconnecting = false;
+  var session = 0;         // bumps on every reconnect trigger
+  var backoff = 1000;      // 1 s, 2 s, 4 s, then capped at 8 s
+  var lastVideoTime = -1;
+  var lastVideoAt = 0;
   var watchdog = null;
 
   function markAlive() {
-    alive = true;
-    if (watchdog) { clearInterval(watchdog); watchdog = null; }
+    live = true;
+    reconnecting = false;
+    badge.className = 'hide';
+    backoff = 1000;
+    lastVideoAt = Date.now();
   }
-
-  function poke() {
-    if (alive) return;
-    still.onerror = null;
-    still.src = '/snapshot.jpg?t=' + Date.now();
-    mjpeg.src = '/stream?t=' + Date.now();
-  }
-
-  still.onload = markAlive;
-  mjpeg.onload = markAlive;
-  mjpeg.onerror = function () { alive = false; };
-  watchdog = setInterval(poke, 3000);
 
   function showMjpeg() {
-    if (live) return;
-    live = true;
-    rtc.className = 'hide';
-    still.className = 'hide';
-    mjpeg.className = '';
+    if (mjpeg.src) return;
     mjpeg.src = '/stream?t=' + Date.now();
-    status.textContent = 'MJPEG';
+  }
+
+  /** Retry the /offer handshake for [mySession] forever with 1,2,4…8 s backoff. */
+  function reconnect(mySession, immediate) {
+    badge.className = '';
+    status.textContent = 'Reconnecting…';
+    var wait = immediate ? 0 : backoff;
+    if (!immediate) backoff = Math.min(backoff * 2, 8000);
+    setTimeout(function () {
+      if (mySession !== session) return;
+      doOffer(mySession).then(function (done) {
+        if (!done && mySession === session) reconnect(mySession);
+      }, function () {
+        if (mySession === session) reconnect(mySession);
+      });
+    }, wait);
+  }
+
+  /** Keep showing the last frame (or a fresh snapshot) and start the retry loop. */
+  function startReconnect(reason) {
+    if (reconnecting) return;
+    reconnecting = true;
+    live = false;
+    var wasVideo = !rtc.classList.contains('hide') || !still.classList.contains('hide');
+    if (reason !== 'boot' && wasVideo) {
+      // A fresh snapshot stands in for the stale video while the loop runs.
+      setTimeout(function () {
+        if (reconnecting) still.src = '/snapshot.jpg?t=' + Date.now();
+      }, 400);
+    }
+    reconnect(++session, reason === 'boot');
   }
 
   function waitIce(pc) {
@@ -66,10 +92,25 @@
     });
   }
 
-  function startWebRtc() {
-    var pc = new RTCPeerConnection({ iceServers: [] });
+  function doOffer(mySession) {
+    if (mySession !== session) return Promise.resolve(true);
+    var pc;
+    try {
+      pc = new RTCPeerConnection({ iceServers: [] });
+    } catch (error) {
+      return Promise.resolve(false);
+    }
+    var settled = false;
+    var ended = false;
+    function end() {
+      if (ended) return;
+      ended = true;
+      try { pc.close(); } catch (closeError) {}
+      startReconnect('ice');
+    }
     pc.addTransceiver('video', { direction: 'recvonly' });
     pc.ontrack = function (event) {
+      if (mySession !== session) return;
       var stream = (event.streams && event.streams[0]) || new MediaStream([event.track]);
       rtc.srcObject = stream;
       still.className = 'hide';
@@ -77,35 +118,58 @@
       rtc.className = '';
       status.textContent = 'WebRTC';
       markAlive();
-      live = true;
+      settled = true;
+    };
+    pc.oniceconnectionstatechange = function () {
+      var s = pc.iceConnectionState;
+      if (s === 'failed' || s === 'closed') end();
+      else if (s === 'disconnected') {
+        // Transient loss: keep the frozen frame, drop the peer after a pause.
+        setTimeout(function () {
+          if (pc.iceConnectionState !== 'connected') end();
+        }, 2000);
+      }
     };
     pc.onconnectionstatechange = function () {
-      if (pc.connectionState === 'failed') showMjpeg();
+      var s = pc.connectionState;
+      if (s === 'failed' || s === 'closed') end();
     };
     return pc.createOffer().then(function (offer) {
       return pc.setLocalDescription(offer);
     }).then(function () {
       return waitIce(pc);
     }).then(function () {
-      var local = pc.localDescription;
+      if (mySession !== session) return true;
       return fetch('/offer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: local.type, sdp: local.sdp })
+        body: JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp })
+      }).then(function (response) {
+        if (!response.ok) return false;
+        return response.json();
+      }).then(function (answer) {
+        if (!answer) return false;
+        return pc.setRemoteDescription(answer).then(function () {
+          setTimeout(function () { if (!live) showMjpeg(); }, 7000);
+          return true;
+        });
       });
-    }).then(function (response) {
-      if (!response.ok) throw new Error('offer');
-      return response.json();
-    }).then(function (answer) {
-      return pc.setRemoteDescription(answer);
-    }).then(function () {
-      setTimeout(function () {
-        if (!live) showMjpeg();
-      }, 7000);
     });
   }
 
-  startWebRtc().catch(function () { showMjpeg(); });
+  // No decoded frame for 5 s counts as a stall in WebRTC. Basic auth is already
+  // cached by the browser, so reconnecting never re-prompts for the password.
+  watchdog = setInterval(function () {
+    if (!live) return;
+    if (rtc.readyState >= 2 && rtc.currentTime !== lastVideoTime) {
+      lastVideoTime = rtc.currentTime;
+      lastVideoAt = Date.now();
+      return;
+    }
+    if (Date.now() - lastVideoAt > 5000) startReconnect('stall');
+  }, 3000);
+
+  startReconnect('boot');
 })();
 </script>
 </body>

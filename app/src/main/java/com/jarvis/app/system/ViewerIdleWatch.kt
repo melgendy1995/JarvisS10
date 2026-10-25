@@ -4,20 +4,27 @@ package com.jarvis.app.system
  * Viewer activity for the on-demand camera. Pure logic with an injectable clock
  * so unit tests can drive time. Sticky viewers (/stream, WebRTC) count until
  * they explicitly leave; snapshot viewers count while their last hit is fresh.
+ * [departGraceMillis] holds "a viewer is still around" right after the last
+ * sticky viewer leaves, so a WebRTC peer dropped after a transient ICE
+ * DISCONNECTED does not immediately read as an empty shelf — the camera idle
+ * countdown then starts once the grace is spent.
  */
 internal class ViewerIdleWatch(
     private val idleTimeoutMillis: Long,
     private val nowMillis: () -> Long,
+    private val departGraceMillis: Long = 0L,
 ) {
     private data class Entry(val sticky: Boolean, var lastHitMillis: Long)
 
     private val viewers = HashMap<String, Entry>()
     private var lastBusyMillis: Long = nowMillis()
+    private var graceHoldUntilMillis: Long = 0L
 
     /** Named viewer such as an open /stream connection or a WebRTC peer. */
     fun arrived(id: String) {
         synchronized(this) {
             viewers[id] = Entry(sticky = true, lastHitMillis = nowMillis())
+            graceHoldUntilMillis = 0L
             lastBusyMillis = nowMillis()
         }
     }
@@ -34,7 +41,10 @@ internal class ViewerIdleWatch(
         val now = nowMillis()
         synchronized(this) {
             viewers.remove(id)
-            if (viewers.isEmpty()) lastBusyMillis = now
+            if (viewers.isEmpty()) {
+                lastBusyMillis = now
+                graceHoldUntilMillis = now + departGraceMillis
+            }
         }
     }
 
@@ -45,11 +55,12 @@ internal class ViewerIdleWatch(
         }
     }
 
-    /** Milliseconds with no viewers, or null while viewers remain. */
+    /** Milliseconds with no viewers, or null while a viewer (or the grace window) holds it. */
     fun idleMillis(atMillis: Long = nowMillis()): Long? {
         synchronized(this) {
             purgeExpired(atMillis)
             if (viewers.isNotEmpty()) return null
+            if (atMillis < graceHoldUntilMillis) return null
             return atMillis - lastBusyMillis
         }
     }

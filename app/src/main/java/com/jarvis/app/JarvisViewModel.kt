@@ -7,9 +7,12 @@ import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.jarvis.app.system.AndroidCoarseLocation
 import com.jarvis.app.system.LanAddress
 import com.jarvis.app.system.ListenForegroundService
 import com.jarvis.app.system.MediaDuck
+import com.jarvis.app.system.OpenMeteoClient
+import com.jarvis.app.system.ShelfWeather
 import com.jarvis.app.system.VoiceLanguageStore
 import com.jarvis.app.system.WakeLog
 import com.jarvis.app.system.WakeRuntime
@@ -32,6 +35,8 @@ import com.jarvis.core.brain.LiveFollowUp
 import com.jarvis.core.brain.MemoryFact
 import com.jarvis.core.brain.SearchSource
 import com.jarvis.core.brain.Speaker
+import com.jarvis.core.skills.CoarseFix
+import com.jarvis.core.skills.WeatherClient
 import com.jarvis.data.Channels
 import com.jarvis.data.FallbackMemory
 import com.jarvis.data.SummaryText
@@ -136,6 +141,52 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /**
+     * Current weather for the WeatherSkill default source: the phone's coarse fix
+     * when it is already granted (never prompted from here), else Riyadh. The label
+     * mirrors WeatherSkill's shelf so a spoken answer still overwrites it later.
+     */
+    private suspend fun weatherLoop() {
+        val client = OpenMeteoClient()
+        val fixes = AndroidCoarseLocation(app)
+        while (coroutineContext.isActive) {
+            val ok = runCatching { refreshWeatherLabel(client, fixes) }.getOrDefault(false)
+            delay(ShelfWeather.nextDelay(ok))
+        }
+    }
+
+    private suspend fun refreshWeatherLabel(client: WeatherClient, fixes: CoarseFix): Boolean {
+        val point = if (fixes.permitted) {
+            try {
+                fixes.read()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                null
+            }
+        } else {
+            null
+        }
+        val device = point != null
+        val reading = withContext(Dispatchers.IO) {
+            client.fetch(
+                point?.latitude ?: ShelfWeather.RIYADH_LAT,
+                point?.longitude ?: ShelfWeather.RIYADH_LON,
+            )
+        }
+        return if (reading == null) {
+            Log.i(ShelfWeather.TAG, "shelf refresh failed reason=empty")
+            false
+        } else {
+            val label = ShelfWeather.label(device, reading)
+            if (label != null && label != _ui.value.weatherLabel) {
+                _ui.update { it.copy(weatherLabel = label) }
+            }
+            Log.i(ShelfWeather.TAG, "shelf refresh ok temp=${reading.celsius}")
+            true
+        }
+    }
+
     private var holding = false
     private var heard: String? = null
     private var heardConfidence = -1f
@@ -220,6 +271,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 delay(LAN_REFRESH_MILLIS)
             }
         }
+        // The shelf weather starts with a fetch so it never shows "--" after launch,
+        // then keeps to the 30-minute refresh with a 2-minute retry on failure.
+        viewModelScope.launch { weatherLoop() }
         viewModelScope.launch {
             app.announcements.collect { message ->
                 speechQueue.send(

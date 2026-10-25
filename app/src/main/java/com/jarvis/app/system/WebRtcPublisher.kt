@@ -25,6 +25,7 @@ import org.webrtc.SdpObserver
 import org.webrtc.SurfaceTextureHelper
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
+import org.webrtc.audio.JavaAudioDeviceModule
 
 /**
  * Video-only WebRTC. No audio track, so the wake-word microphone stays with the other service.
@@ -45,6 +46,7 @@ internal class WebRtcPublisher(context: Context) {
     )
     private var eglBase: EglBase? = null
     private var factory: PeerConnectionFactory? = null
+    private var audioModule: JavaAudioDeviceModule? = null
     private var helper: SurfaceTextureHelper? = null
     private var videoSource: VideoSource? = null
     private var videoTrack: VideoTrack? = null
@@ -120,11 +122,13 @@ internal class WebRtcPublisher(context: Context) {
             runCatching { helper?.stopListening() }
             runCatching { helper?.dispose() }
             runCatching { factory?.dispose() }
+            runCatching { audioModule?.release() }
             runCatching { eglBase?.release() }
             videoTrack = null
             videoSource = null
             helper = null
             factory = null
+            audioModule = null
             eglBase = null
             done.complete(Unit)
         }
@@ -136,7 +140,17 @@ internal class WebRtcPublisher(context: Context) {
         ensureFactoryInit(app)
         val egl = EglBase.create()
         eglBase = egl
+        // The stream is video-only. An explicitly provided ADM keeps the default
+        // factory from ever wiring a recorder or hardware echo/noise effects into
+        // the phone's mic session while SpeechRecognizer or the wake listener
+        // holds audio.
+        val audio = JavaAudioDeviceModule.builder(app)
+            .setUseHardwareAcousticEchoCanceler(false)
+            .setUseHardwareNoiseSuppressor(false)
+            .createAudioDeviceModule()
+        audioModule = audio
         val created = PeerConnectionFactory.builder()
+            .setAudioDeviceModule(audio)
             .setVideoEncoderFactory(DefaultVideoEncoderFactory(egl.eglBaseContext, true, true))
             .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext))
             .createPeerConnectionFactory()

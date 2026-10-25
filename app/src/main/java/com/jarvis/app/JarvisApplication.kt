@@ -2,9 +2,13 @@ package com.jarvis.app
 
 import android.app.Application
 import android.util.Log
+import com.jarvis.app.system.AndroidAppControl
 import com.jarvis.app.system.AndroidCameraController
 import com.jarvis.app.system.AndroidCoarseLocation
 import com.jarvis.app.system.AppTimerScheduler
+import com.jarvis.app.system.CameraOnDemand
+import com.jarvis.app.system.CameraStatusSkill
+import com.jarvis.app.system.CameraStreamService
 import com.jarvis.app.system.CameraPasswordStore
 import com.jarvis.app.system.CameraPortStore
 import com.jarvis.app.system.CameraTorchController
@@ -14,8 +18,6 @@ import com.jarvis.app.system.StreamAddressLookup
 import com.jarvis.core.CommandRouter
 import com.jarvis.core.brain.BrainChain
 import com.jarvis.core.brain.BrainResult
-import com.jarvis.app.system.AndroidAppControl
-import com.jarvis.app.system.CameraOnDemand
 import com.jarvis.app.system.FrameHub
 import com.jarvis.core.camera.CameraEndpoints
 import com.jarvis.core.skills.AppControlSkill
@@ -151,6 +153,8 @@ class JarvisApplication : Application() {
         cameraOnDemand?.start()
         // Ahead of app launch so "start the camera" is the stream, not the camera app.
         registry.register(CameraSkill(AndroidCameraController(this)))
+        // "Is anyone watching" reads state only; it never turns the stream off.
+        registry.register(CameraStatusSkill { cameraStatusText() })
         registry.register(AppControlSkill(AndroidAppControl(this)))
         router = CommandRouter(registry)
         firebaseReady = GeminiFirebase.install(this)
@@ -252,6 +256,17 @@ class JarvisApplication : Application() {
     }
 
     fun cameraEndpoints(): CameraEndpoints = StreamAddressLookup.lookup(cameraPort())
+
+    /** Answer for the read-only camera status skill. It changes nothing. */
+    private fun cameraStatusText(): String {
+        val viewers = cameraOnDemand?.viewerCount() ?: 0
+        return when {
+            !CameraStreamService.running -> "The camera is off right now."
+            viewers <= 0 -> "The camera is on, and no one is watching right now."
+            viewers == 1 -> "The camera is on, and one viewer is connected."
+            else -> "The camera is on, and $viewers viewers are connected."
+        }
+    }
 
     /** True when a local skill would claim the text, without running the skill. */
     fun matchesLocalSkill(text: String): Boolean {

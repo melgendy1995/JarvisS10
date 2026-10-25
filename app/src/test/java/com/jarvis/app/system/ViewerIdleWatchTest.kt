@@ -98,3 +98,67 @@ class ViewerIdleWatchTest {
         assertTrue(watch.idleTimedOut())
     }
 }
+
+class ViewerIdleWatchGraceTest {
+    private var now = 0L
+    private fun clock() = now
+    private fun watch() = ViewerIdleWatch(idleTimeoutMillis = 45_000, nowMillis = ::clock, departGraceMillis = 15_000)
+
+    @Test
+    fun theIdleCountdownWaitsOutTheDepartGrace() {
+        val watch = watch()
+        watch.arrived("webrtc")
+        watch.departed("webrtc")
+        // A transient ICE DISCONNECTED drop must not read as an empty shelf.
+        now = 14_999
+        assertNull(watch.idleMillis())
+        assertFalse(watch.idleTimedOut())
+        // The grace bakes into the idle clock, so idle reads 15 s at its end.
+        now = 15_000
+        assertEquals(15_000L, watch.idleMillis())
+    }
+
+    @Test
+    fun theIdleTimeoutUnchangedByTheGrace() {
+        val watch = watch()
+        watch.arrived("webrtc")
+        watch.departed("webrtc")
+        // Same 45-s cutoff as before; the grace only delays the "empty" moment.
+        now = 44_999
+        assertFalse(watch.idleTimedOut())
+        now = 45_000
+        assertTrue(watch.idleTimedOut())
+    }
+
+    @Test
+    fun aNewViewerInsideTheGraceCancelsIt() {
+        val watch = watch()
+        watch.arrived("webrtc")
+        watch.departed("webrtc")
+        now = 5_000
+        watch.arrived("webrtc-2")
+        now = 19_000
+        assertNull(watch.idleMillis())
+        assertEquals(1, watch.activeCount())
+    }
+
+    @Test
+    fun zeroGraceKeepsTheOldBehavior() {
+        val watch = ViewerIdleWatch(idleTimeoutMillis = 45_000, nowMillis = ::clock)
+        watch.arrived("webrtc")
+        watch.departed("webrtc")
+        now = 45_000
+        assertTrue(watch.idleTimedOut())
+    }
+
+    @Test
+    fun noGraceWhenOtherViewersRemain() {
+        val watch = watch()
+        watch.arrived("webrtc")
+        watch.touched("snapshot")
+        watch.departed("webrtc")
+        now = 1_000
+        assertEquals(1, watch.activeCount())
+        assertNull(watch.idleMillis())
+    }
+}

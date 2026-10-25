@@ -51,7 +51,13 @@ internal class CameraOnDemand(
     private val password: () -> String,
     private val ports: CameraPortStore,
 ) : CameraOnDemandHooks {
-    private val watch = ViewerIdleWatch(IDLE_MILLIS) { SystemClock.elapsedRealtime() }
+    private val watch = ViewerIdleWatch(
+        idleTimeoutMillis = IDLE_MILLIS,
+        nowMillis = { SystemClock.elapsedRealtime() },
+        // A WebRTC peer dropped during a transient ICE DISCONNECTED gets this
+        // window to reconnect before it counts as the shelf going empty.
+        departGraceMillis = DEPART_GRACE_MILLIS,
+    )
     private val starting = AtomicBoolean(false)
     private val stopping = AtomicBoolean(false)
     private val streamIds = AtomicInteger(0)
@@ -160,6 +166,9 @@ internal class CameraOnDemand(
         hasPeers = active
     }
 
+    /** Read-only, for CameraStatusSkill: viewers on the shelf right now. */
+    fun viewerCount(): Int = watch.activeCount()
+
     private suspend fun bindingLoop() {
         while (true) {
             val port = ports.get()
@@ -208,5 +217,8 @@ internal class CameraOnDemand(
         const val MONITOR_MILLIS = 2_500L
         const val WEBRTC_ID = "webrtc"
         const val SNAPSHOT_ID = "snapshot"
+
+        /** Breath after the last WebRTC peer drops, matching the 1–8 s viewer backoff. */
+        const val DEPART_GRACE_MILLIS = 15_000L
     }
 }

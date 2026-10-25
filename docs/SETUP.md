@@ -50,3 +50,9 @@ Whisper runs only after on-device speech recognition fails, and only when Gemini
 ## Voice control of other apps
 
 "Open YouTube", "play … on YouTube", pause, and volume are documented in [APP_CONTROL.md](APP_CONTROL.md), including the accessibility switch, kiosk device-owner command, and what Android 12 allows while another app is in front.
+
+## Install script
+
+`scripts/install.sh [--no-build] [--serial SERIAL] [--no-pin]` builds `app-debug.apk` (skipped with `--no-build`, or when the APK is newer than everything under `*/src`), installs it with `adb install -r`, re-enables the accessibility service (without dropping other enabled services), re-grants the notification listener, relaunches `MainActivity`, and prints a status block. The default serial comes from `$ANDROID_SERIAL`, else `R3CM501081Z`.
+
+Kiosk: this install is not device owner, so the script pins the Jarvis task with `am task lock <id>` (screen pinning). Pass `--no-pin` to skip, or leave it to `KioskGate` when the app does become device owner.

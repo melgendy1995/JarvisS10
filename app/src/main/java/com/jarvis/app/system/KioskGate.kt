@@ -48,11 +48,20 @@ object KioskGate {
     }
 
     fun onJarvisVisible() {
-        if (!leftLockTask) return
         val host = activity ?: return
-        val reentered = runCatching { host.startLockTask() }.isSuccess
-        Log.i(TAG, "lock-task re-entered success=$reentered")
-        if (reentered) leftLockTask = false
+        if (leftLockTask) {
+            val reentered = runCatching { host.startLockTask() }.isSuccess
+            Log.i(TAG, "lock-task re-entered success=$reentered")
+            if (reentered) leftLockTask = false
+            return
+        }
+        // A device owner is always allowed back into lock task: after a reboot or a
+        // manual exit, being in front again is enough to re-enter. Non-owner phones
+        // (screen pinning) are left alone here so a phone returned to HOME stays out.
+        if (isDeviceOwner(host) && lockState(host) == ActivityManager.LOCK_TASK_MODE_NONE) {
+            val entered = runCatching { host.startLockTask() }.isSuccess
+            Log.i(TAG, "lock-task entered state=none owner=true success=$entered")
+        }
     }
 
     fun returnToJarvis(context: Context) {
