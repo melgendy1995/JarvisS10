@@ -185,8 +185,10 @@ fun JarvisScreen(viewModel: JarvisViewModel) {
                     cameraPort = ui.cameraPort,
                     cameraLan = ui.cameraLan,
                     cameraTailscale = ui.cameraTailscale,
+                    voiceLanguage = ui.voiceLanguage,
                     onSave = viewModel::saveGroqBearer,
                     onSaveCamera = viewModel::saveCameraAccess,
+                    onSetVoiceLanguage = viewModel::setVoiceLanguage,
                     onClose = viewModel::closeGroqSettings,
                 )
             }

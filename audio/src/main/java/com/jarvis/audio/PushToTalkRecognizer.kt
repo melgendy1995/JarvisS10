@@ -237,11 +237,7 @@ class PushToTalkRecognizer(
         }
     }
 
-    private fun primaryLanguageTag(): String = when (voiceLanguage()) {
-        "en" -> "en-US"
-        "ar" -> "ar-SA"
-        else -> Locale.getDefault().toLanguageTag()
-    }
+    private fun primaryLanguageTag(): String = VoiceLanguageTags.resolve(voiceLanguage(), Locale.getDefault().toLanguageTag())
 
     private fun visibleTargets(): List<RecognitionTarget> {
         val intent = Intent(RecognitionService.SERVICE_INTERFACE)

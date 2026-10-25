@@ -56,3 +56,9 @@ Whisper runs only after on-device speech recognition fails, and only when Gemini
 `scripts/install.sh [--no-build] [--serial SERIAL] [--no-pin]` builds `app-debug.apk` (skipped with `--no-build`, or when the APK is newer than everything under `*/src`), installs it with `adb install -r`, re-enables the accessibility service (without dropping other enabled services), re-grants the notification listener, relaunches `MainActivity`, and prints a status block. The default serial comes from `$ANDROID_SERIAL`, else `R3CM501081Z`.
 
 Kiosk: this install is not device owner, so the script pins the Jarvis task with `am task lock <id>` (screen pinning). Pass `--no-pin` to skip, or leave it to `KioskGate` when the app does become device owner.
+
+## Device smoke test
+
+`scripts/device-smoke.sh [--serial SERIAL]` (default serial from `$ANDROID_SERIAL`, else `R3CM501081Z`) runs a battery of end-to-end checks on the phone and prints one `PASS|FAIL|SKIP  <name>  <detail>` line per check plus a `N pass, N fail, N skip` summary, to stdout and to `logs/smoke-<timestamp>.txt`. It checks the app process and crash buffer, the shelf Wi-Fi IP, that port 8088 answers 401 without credentials, a question in English and one in Arabic through the debug `DebugAskReceiver` broadcast, YouTube Music play/pause/resume in both languages (media session state 3/2), the "Nothing is playing." line when nothing runs, camera stream start/stop, and a generated `say -v Daniel "hey jarvis"` wav replayed into the wake listener per [WAKE_WORD.md](WAKE_WORD.md). The script is file-only (no speaker output), never unlocks the phone, and never reads a secret store. A failing check never stops the run.
+
+Unlock the phone for the YouTube Music checks — play/search needs YT Music on screen, and those checks SKIP with "phone locked" otherwise. If the kiosk pin from install.sh was active, the script unpins before the media checks and re-pins Jarvis when it exits.

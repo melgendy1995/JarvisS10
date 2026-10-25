@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.clickable
 import android.widget.Toast
+import com.jarvis.app.system.VoiceLanguageStore
 import kotlinx.coroutines.delay
 
 private val Groq = Color(0xFFFF9E40)
@@ -57,8 +58,10 @@ fun GroqSettings(
     cameraPort: Int,
     cameraLan: String,
     cameraTailscale: String,
+    voiceLanguage: String,
     onSave: (String) -> Unit,
     onSaveCamera: (String, String) -> Boolean,
+    onSetVoiceLanguage: (String) -> Unit,
     onClose: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -223,9 +226,64 @@ fun GroqSettings(
                 )
             }
         }
+        Spacer(Modifier.height(28.dp))
+        Text(
+            text = "VOICE LANGUAGE",
+            color = Groq.copy(alpha = 0.9f),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Light,
+            letterSpacing = 4.sp,
+        )
+        Spacer(Modifier.height(18.dp))
+        Text(
+            text = "Language used for speech recognition. Auto also re-checks Arabic with Whisper.",
+            color = Faint,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Light,
+        )
+        Spacer(Modifier.height(18.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            voiceChoice("Auto", voiceLanguage == VoiceLanguageStore.AUTO) {
+                onSetVoiceLanguage(VoiceLanguageStore.AUTO)
+                savedNote = true
+            }
+            Spacer(Modifier.width(20.dp))
+            voiceChoice("English", voiceLanguage == VoiceLanguageStore.EN) {
+                onSetVoiceLanguage(VoiceLanguageStore.EN)
+                savedNote = true
+            }
+            Spacer(Modifier.width(20.dp))
+            voiceChoice("العربية", voiceLanguage == VoiceLanguageStore.AR) {
+                onSetVoiceLanguage(VoiceLanguageStore.AR)
+                savedNote = true
+            }
+            if (savedNote) {
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = "Saved ✓",
+                    color = Color(0xFF9EE7FF),
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
         Spacer(Modifier.height(16.dp))
         }
     }
+}
+
+@Composable
+private fun voiceChoice(label: String, selected: Boolean, onPick: () -> Unit) {
+    Text(
+        text = label,
+        color = if (selected) Groq else Faint,
+        fontSize = 16.sp,
+        fontWeight = if (selected) FontWeight.Medium else FontWeight.Light,
+        modifier = Modifier
+            .heightIn(min = 40.dp)
+            .clickable(onClick = onPick)
+            .semantics { contentDescription = label },
+    )
 }
 
 @Composable

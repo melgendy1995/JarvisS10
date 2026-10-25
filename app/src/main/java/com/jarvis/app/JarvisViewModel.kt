@@ -90,6 +90,7 @@ data class JarvisUiState(
     val cameraPort: Int = 8088,
     val cameraLan: String = "",
     val cameraTailscale: String = "",
+    val voiceLanguage: String = VoiceLanguageStore.AUTO,
     val shelfLan: String = "No Wi-Fi",
     val weatherLabel: String? = null,
     val sources: List<SearchSource> = emptyList(),
@@ -432,6 +433,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 cameraPort = app.cameraPort(),
                 cameraLan = ends.lanText(),
                 cameraTailscale = ends.tailscaleText(),
+                voiceLanguage = VoiceLanguageStore.get(getApplication()),
             )
         }
     }
@@ -463,6 +465,12 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     fun closeGroqSettings() {
         _ui.update { it.copy(groqSettings = false) }
+    }
+
+    fun setVoiceLanguage(value: String) {
+        VoiceLanguageStore.set(getApplication(), value)
+        Log.i(VOICE, "voice language set=$value")
+        _ui.update { it.copy(voiceLanguage = VoiceLanguageStore.get(getApplication())) }
     }
 
     fun saveGroqBearer(token: String) {
