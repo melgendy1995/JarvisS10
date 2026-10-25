@@ -92,7 +92,10 @@ object KioskGate {
             return
         }
         val ok = runCatching { host.startLockTask() }.isSuccess
-        Log.i(TAG, "lock-task focus retry success=$ok state=${lockState(host)}")
+        val keyguard = host.getSystemService(android.app.KeyguardManager::class.java)?.isKeyguardLocked == true
+        // Without device owner, startLockTask() only asks SystemUI for the pinning prompt,
+        // and SystemUI does not show it while the keyguard is up under Jarvis.
+        Log.i(TAG, "lock-task focus retry success=$ok state=${lockState(host)} keyguardLocked=$keyguard")
         leftLockTask = false
     }
 

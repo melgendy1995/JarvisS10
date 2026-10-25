@@ -54,6 +54,11 @@ class AndroidAppControl(context: Context) : AppControl {
         )
         playback.setBusy(true)
         launchedPackage = null
+        if (action == AppControlPhrases.PLAY || action == AppControlPhrases.RETURN ||
+            (action == AppControlPhrases.MEDIA && slots["media"] == "pause")
+        ) {
+            MusicGuard.forget("action=$action")
+        }
         return try {
             withContext(Dispatchers.Main) {
                 val result = when (action) {
@@ -98,6 +103,15 @@ class AndroidAppControl(context: Context) : AppControl {
         val named = packageForTarget(target)
         if (target.isNotEmpty() && named == null) {
             return SkillResult(missingTarget(target, arabic), success = false)
+        }
+        if (phoneLocked()) {
+            // Jarvis shows over the PIN keyguard, but any app it opens lands behind it:
+            // the search screen is never visible and taps hit the lock screen.
+            Log.i(TAG, "play skipped, phone is locked")
+            return SkillResult(
+                if (arabic) "الجوال مقفول. افتح القفل وأنا أشغلها." else "The phone is locked. Unlock it and I'll play it.",
+                success = false,
+            )
         }
         if (named != null && named != AppMatcher.YOUTUBE) {
             val directStarted = directPlay(named, query)
@@ -391,6 +405,12 @@ class AndroidAppControl(context: Context) : AppControl {
         return false
     }
 
+    private fun phoneLocked(): Boolean =
+        appContext.getSystemService(android.app.KeyguardManager::class.java)?.isKeyguardLocked == true
+
+
+
+
     /** Title|artist of the session's current item, or null when it is not playing. */
     private fun trackKey(pkg: String): String? {
         val controller = activeController(pkg) ?: return null
@@ -404,8 +424,8 @@ class AndroidAppControl(context: Context) : AppControl {
      * Audio that was already playing is not proof the search took. Accept only a playing
      * item that matches the query or differs from the one playing before the request.
      */
-    private suspend fun awaitNewTrack(pkg: String, query: String, before: String?): Boolean {
-        repeat(12) {
+    private suspend fun awaitNewTrack(pkg: String, query: String, before: String?, slices: Int = 12): Boolean {
+        repeat(slices) {
             val controller = activeController(pkg)
             if (controller?.playbackState?.state == PlaybackState.STATE_PLAYING) {
                 val meta = controller.metadata

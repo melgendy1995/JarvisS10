@@ -721,6 +721,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         handsFreeTurn: Boolean = false,
     ) {
         Log.i(VOICE, "utterance begin chars=${text.length}")
+        com.jarvis.app.system.MusicGuard.remember(getApplication(), "utterance")
         pushLevel(0f)
         _ui.update {
             it.copy(
@@ -1005,6 +1006,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             }
         } finally {
             mic?.muted = false
+            val guardContext: android.content.Context = getApplication()
+            app.voiceScope.launch { com.jarvis.app.system.MusicGuard.restore(guardContext) }
             if (token == bargeSession) {
                 bargeSession++
                 recognizer.discard()
@@ -1075,6 +1078,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 return@launch
             }
+            com.jarvis.app.system.MusicGuard.remember(getApplication(), "wake")
             duck.acquireIfPlaying()
             if (playChime) withContext(Dispatchers.IO) { chime.playAndWait() }
             if (gen != generation || holding) return@launch

@@ -47,14 +47,7 @@ class JarvisAccessibilityService : AccessibilityService() {
     override fun onInterrupt() = Unit
 
     fun snapshot(): List<UiNode> {
-        val roots = ArrayList<AccessibilityNodeInfo>()
-        for (window in windows) {
-            val root = window.root ?: continue
-            roots += root
-        }
-        if (roots.isEmpty()) {
-            rootInActiveWindow?.let { roots += it }
-        }
+        val roots = currentRoots()
         val nodes = ArrayList<UiNode>()
         for (root in roots) {
             collect(root, nodes)
@@ -223,12 +216,22 @@ class JarvisAccessibilityService : AccessibilityService() {
         return false
     }
 
+    /**
+     * Only the YouTube apps' own windows. Interactive windows also include the lock
+     * screen, the notification shade and the navigation bar, whose "Play" buttons
+     * ("Play Store", a media notification) must never be tapped as a search result.
+     */
     private fun currentRoots(): List<AccessibilityNodeInfo> {
         val roots = ArrayList<AccessibilityNodeInfo>()
         for (window in windows) {
-            window.root?.let { roots += it }
+            val root = window.root ?: continue
+            if (root.packageName?.toString() in SCOPED_PACKAGES) roots += root else root.recycle()
         }
-        if (roots.isEmpty()) rootInActiveWindow?.let { roots += it }
+        if (roots.isEmpty()) {
+            rootInActiveWindow?.let { root ->
+                if (root.packageName?.toString() in SCOPED_PACKAGES) roots += root else root.recycle()
+            }
+        }
         return roots
     }
 
@@ -290,6 +293,7 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     companion object {
+        private val SCOPED_PACKAGES = setOf("com.google.android.youtube", "com.google.android.apps.youtube.music")
         private const val TAG = "JarvisAccessibility"
 
         @Volatile
