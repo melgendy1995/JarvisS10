@@ -19,6 +19,11 @@ import java.util.LinkedHashSet
  * Basic auth and the login cookie both compare the password in constant time.
  * The password is never written to the response or the log.
  * POST bodies are read from the socket. NanoHTTPD's temp-file parser is not used.
+ *
+ * The server lives with the app, not with a camera session. When the camera is
+ * off, an authenticated media request starts it on demand; the feed itself is
+ * waited for up to [FRAME_WAIT_MS] so the page never shows a black frame or a
+ * placeholder error while the camera is coming up.
  */
 internal class CameraHttpServer(
     context: Context,
@@ -26,6 +31,7 @@ internal class CameraHttpServer(
     private val password: () -> String,
     private val hub: FrameHub,
     private val answerer: (String) -> String?,
+    private val onDemand: CameraOnDemandHooks,
 ) : NanoHTTPD("0.0.0.0", port) {
     private val viewer = context.resources.openRawResource(com.jarvis.app.R.raw.camera_viewer)
         .bufferedReader()
@@ -56,7 +62,7 @@ internal class CameraHttpServer(
             return unauthorized(if (html) LOGIN else "Unauthorized", if (html) "text/html; charset=utf-8" else "text/plain; charset=utf-8")
         }
         val response = when {
-            method == Method.GET && (path == "/" || path == "/index.html") -> text(Response.Status.OK, "text/html; charset=utf-8", viewer)
+            method == Method.GET && (path == "/" || path == "/index.html") -> page()
             method == Method.GET && path == "/snapshot.jpg" -> snapshot()
             method == Method.GET && path == "/stream" -> stream()
             method == Method.POST && path == "/offer" -> offer(session)
@@ -66,6 +72,24 @@ internal class CameraHttpServer(
         }
         Log.i(TAG, "$method $path ${response.status.requestStatus}")
         return response
+    }
+
+    /** Authenticated media path; starts the camera when it is off. */
+    private fun gate(): Response? {
+        return when (val access = onDemand.mediaAccess()) {
+            is MediaAccess.Allow -> null
+            is MediaAccess.Refuse -> text(Response.Status.SERVICE_UNAVAILABLE, "text/plain; charset=utf-8", access.reason)
+        }
+    }
+
+    /** Waits out the camera coming up so the page never renders an error first. */
+    private fun hasFrameOrWait(): Boolean {
+        if ((hub.snapshot()?.size ?: 0) >= 4) return true
+        return hub.awaitFirst(FRAME_WAIT_MS)
+    }
+
+    private fun page(): Response {
+        return gate() ?: text(Response.Status.OK, "text/html; charset=utf-8", viewer)
     }
 
     private fun authorized(session: IHTTPSession): Boolean {
@@ -92,6 +116,8 @@ internal class CameraHttpServer(
     }
 
     private fun offer(session: IHTTPSession): Response {
+        val refused = gate()
+        if (refused != null) return refused
         val body = readBody(session) ?: return text(Response.Status.PAYLOAD_TOO_LARGE, "text/plain", "Too large")
         val type = JsonText.stringField(body, "type")
         val sdp = JsonText.stringField(body, "sdp")
@@ -99,17 +125,23 @@ internal class CameraHttpServer(
             Log.i(TAG, "POST /offer 400")
             return text(Response.Status.BAD_REQUEST, "text/plain", "Bad offer")
         }
+        hasFrameOrWait()
         val answer = answerer(sdp)
         if (answer.isNullOrBlank()) {
+            Log.i(TAG, "POST /offer 503")
             return text(Response.Status.SERVICE_UNAVAILABLE, "text/plain", "WebRTC unavailable")
         }
         return text(Response.Status.OK, "application/json; charset=utf-8", JsonText.answer(answer))
     }
 
     private fun snapshot(): Response {
+        val refused = gate()
+        if (refused != null) return refused
+        onDemand.snapshotViewerTouched()
+        hasFrameOrWait()
         val jpeg = hub.snapshot()
         if (jpeg == null || jpeg.size < 4) {
-            return text(Response.Status.SERVICE_UNAVAILABLE, "text/plain", "No frame")
+            return text(Response.Status.SERVICE_UNAVAILABLE, "text/plain; charset=utf-8", "Camera is starting")
         }
         return NanoHTTPD.newFixedLengthResponse(
             Response.Status.OK,
@@ -123,10 +155,18 @@ internal class CameraHttpServer(
     }
 
     private fun stream(): Response {
+        val refused = gate()
+        if (refused != null) return refused
+        hasFrameOrWait()
+        val first = hub.snapshot()
+        if (first == null || first.size < 4) {
+            return text(Response.Status.SERVICE_UNAVAILABLE, "text/plain; charset=utf-8", "Camera is starting")
+        }
+        val id = onDemand.streamViewerOpened()
         return NanoHTTPD.newChunkedResponse(
             Response.Status.OK,
             "multipart/x-mixed-replace; boundary=frame",
-            MjpegStream(hub),
+            MjpegStream(hub) { onDemand.viewerClosed(id) },
         ).apply {
             addHeader("Cache-Control", "no-store")
             addHeader("Connection", "close")
@@ -175,7 +215,10 @@ internal class CameraHttpServer(
         }
     }
 
-    private class MjpegStream(private val hub: FrameHub) : InputStream() {
+    private class MjpegStream(
+        private val hub: FrameHub,
+        private val onClose: () -> Unit,
+    ) : InputStream() {
         @Volatile
         private var closed = false
         private var pending = ByteArray(0)
@@ -206,7 +249,9 @@ internal class CameraHttpServer(
         }
 
         override fun close() {
+            if (closed) return
             closed = true
+            onClose()
         }
 
         private fun multipart(jpeg: ByteArray): ByteArray {
@@ -224,6 +269,9 @@ internal class CameraHttpServer(
         const val TAG = "JarvisCamera"
         const val COOKIE = "jarvis_cam"
         const val MAX_BODY = 262_144L
+
+        /** Grace for an on-demand camera start before the media endpoint gives up. */
+        const val FRAME_WAIT_MS = 5_000L
         val LOGIN = """
             <!DOCTYPE html>
             <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">

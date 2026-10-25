@@ -15,6 +15,8 @@ import com.jarvis.core.CommandRouter
 import com.jarvis.core.brain.BrainChain
 import com.jarvis.core.brain.BrainResult
 import com.jarvis.app.system.AndroidAppControl
+import com.jarvis.app.system.CameraOnDemand
+import com.jarvis.app.system.FrameHub
 import com.jarvis.core.camera.CameraEndpoints
 import com.jarvis.core.skills.AppControlSkill
 import com.jarvis.core.skills.CameraSkill
@@ -79,6 +81,12 @@ class JarvisApplication : Application() {
     lateinit var cameraPasswords: CameraPasswordStore
         private set
 
+    /** One hub for the camera service and the always-on browser server. */
+    internal val cameraHub = FrameHub()
+
+    internal var cameraOnDemand: CameraOnDemand? = null
+        private set
+
     private lateinit var bearerStore: KeystoreBearerStore
     private lateinit var cameraPorts: CameraPortStore
     private lateinit var groqBrain: GroqBrain
@@ -131,6 +139,15 @@ class JarvisApplication : Application() {
         registry.register(MemorySkill(RoomMemory(memory)))
         cameraPasswords = CameraPasswordStore(this)
         cameraPorts = CameraPortStore(this)
+        // The browser feed is always reachable; opening http://<phone>:port starts the camera on demand.
+        cameraOnDemand = CameraOnDemand(
+            context = this,
+            scope = appScope,
+            hub = cameraHub,
+            password = { cameraPasswords.get() },
+            ports = cameraPorts,
+        )
+        cameraOnDemand?.start()
         // Ahead of app launch so "start the camera" is the stream, not the camera app.
         registry.register(CameraSkill(AndroidCameraController(this)))
         registry.register(AppControlSkill(AndroidAppControl(this)))
@@ -227,7 +244,11 @@ class JarvisApplication : Application() {
 
     fun cameraPort(): Int = cameraPorts.get()
 
-    fun saveCameraPort(port: Int): Boolean = cameraPorts.set(port)
+    fun saveCameraPort(port: Int): Boolean {
+        val saved = cameraPorts.set(port)
+        if (saved) cameraOnDemand?.onPortChanged()
+        return saved
+    }
 
     fun cameraEndpoints(): CameraEndpoints = StreamAddressLookup.lookup(cameraPort())
 

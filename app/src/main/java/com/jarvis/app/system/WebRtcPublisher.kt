@@ -42,6 +42,10 @@ internal class WebRtcPublisher(context: Context) {
     private var videoSource: VideoSource? = null
     private var videoTrack: VideoTrack? = null
 
+    /** Peer count for the camera auto-shutdown; only set ever gets one assignment before peers exist. */
+    @Volatile
+    var onPeersChanged: ((Int) -> Unit)? = null
+
     @Volatile
     var surfaceProvider: Preview.SurfaceProvider? = null
         private set
@@ -103,6 +107,7 @@ internal class WebRtcPublisher(context: Context) {
             peers.forEach { peer -> runCatching { peer.close() } }
             peers.forEach { peer -> runCatching { peer.dispose() } }
             peers.clear()
+            notifyPeers()
             runCatching { videoTrack?.dispose() }
             runCatching { videoSource?.dispose() }
             runCatching { helper?.stopListening() }
@@ -175,14 +180,18 @@ internal class WebRtcPublisher(context: Context) {
         }
         val candidates = ArrayList<IceCandidate>()
         val gathering = CompletableFuture<Unit>()
-        val peer = created.createPeerConnection(rtcConfig(), observer(candidates, gathering)) ?: return null
+        var self: PeerConnection? = null
+        val peer = created.createPeerConnection(rtcConfig(), observer(candidates, gathering) {
+            self?.let { drop(it) }
+        }) ?: return null
+        self = peer
         peers.add(peer)
         while (peers.size > 3) {
             val old = peers.pollFirst() ?: break
-            runCatching { old.close() }
-            runCatching { old.dispose() }
+            drop(old)
         }
         peer.addTrack(track, listOf("jarvis"))
+        notifyPeers()
         val offer = SessionDescription(SessionDescription.Type.OFFER, normalized)
         if (!setDescription(peer, offer, remote = true)) {
             drop(peer)
@@ -208,12 +217,22 @@ internal class WebRtcPublisher(context: Context) {
         return sdp
     }
 
-    private fun observer(candidates: MutableList<IceCandidate>, gathering: CompletableFuture<Unit>): PeerConnection.Observer {
+    private fun observer(
+        candidates: MutableList<IceCandidate>,
+        gathering: CompletableFuture<Unit>,
+        onDead: () -> Unit,
+    ): PeerConnection.Observer {
         return object : PeerConnection.Observer {
             override fun onSignalingChange(newState: PeerConnection.SignalingState?) = Unit
 
             override fun onIceConnectionChange(newState: PeerConnection.IceConnectionState?) {
                 Log.i(TAG, "webrtc ice=$newState")
+                if (newState == PeerConnection.IceConnectionState.FAILED ||
+                    newState == PeerConnection.IceConnectionState.CLOSED ||
+                    newState == PeerConnection.IceConnectionState.DISCONNECTED
+                ) {
+                    onDead()
+                }
             }
 
             override fun onIceConnectionReceivingChange(receiving: Boolean) = Unit
@@ -319,6 +338,12 @@ internal class WebRtcPublisher(context: Context) {
         peers.remove(peer)
         runCatching { peer.close() }
         runCatching { peer.dispose() }
+        notifyPeers()
+    }
+
+    /** Dead peers stop counting as viewers so the camera can idle out. */
+    private fun notifyPeers() {
+        runCatching { onPeersChanged?.invoke(peers.size) }
     }
 
     companion object {

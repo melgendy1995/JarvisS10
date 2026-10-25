@@ -23,6 +23,25 @@
   var mjpeg = document.getElementById('mjpeg');
   var status = document.getElementById('status');
   var live = false;
+  var alive = false;
+  var watchdog = null;
+
+  function markAlive() {
+    alive = true;
+    if (watchdog) { clearInterval(watchdog); watchdog = null; }
+  }
+
+  function poke() {
+    if (alive) return;
+    still.onerror = null;
+    still.src = '/snapshot.jpg?t=' + Date.now();
+    mjpeg.src = '/stream?t=' + Date.now();
+  }
+
+  still.onload = markAlive;
+  mjpeg.onload = markAlive;
+  mjpeg.onerror = function () { alive = false; };
+  watchdog = setInterval(poke, 3000);
 
   function showMjpeg() {
     if (live) return;
@@ -57,6 +76,7 @@
       mjpeg.className = 'hide';
       rtc.className = '';
       status.textContent = 'WebRTC';
+      markAlive();
       live = true;
     };
     pc.onconnectionstatechange = function () {

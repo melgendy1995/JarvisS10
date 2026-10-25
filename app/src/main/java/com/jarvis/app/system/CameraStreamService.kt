@@ -47,18 +47,26 @@ import kotlinx.coroutines.withTimeoutOrNull
  * The device here is Android 12, and the manifest still declares the camera
  * foreground-service type required by the app's target SDK.
  */
+/** Who asked for a transition. The on-demand host only re-stops what it started. */
+enum class CameraOrigin { USER, ON_DEMAND }
+
 class CameraStreamService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val hub = FrameHub()
+    private var hub = FrameHub() // replaced in onCreate with the app-scoped hub
     private var engine: CameraEngine? = null
     private var publisher: WebRtcPublisher? = null
-    private var server: CameraHttpServer? = null
     private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
     private val closed = AtomicBoolean(false)
     private var profile = CameraProfiles.FULL
     private var requestedLens = CameraLens.DEFAULT
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        // The app keeps one hub so the always-on browser server sees frames come through.
+        (applicationContext as? JarvisApplication)?.let { hub = it.cameraHub }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action ?: ACTION_START
@@ -137,7 +145,15 @@ class CameraStreamService : Service() {
         publisher = capture
         val webrtcOk = withContext(Dispatchers.Default) { capture.awaitReady(4_000) }
         if (closed.get()) return
-        if (webrtcOk) capture.adapt(profile)
+        if (webrtcOk) {
+            capture.adapt(profile)
+            capture.onPeersChanged = { count ->
+                (applicationContext as? JarvisApplication)?.cameraOnDemand?.peerCountChanged(count)
+            }
+            answerBridge = capture::answer
+        } else {
+            answerBridge = null
+        }
         val session = CameraEngine(this, hub) { degrees -> capture.setRotation(degrees) }
         engine = session
         session.setThermalStatus(status)
@@ -163,28 +179,10 @@ class CameraStreamService : Service() {
             fail(CameraOutcome.FAILED)
             return
         }
-        val port = CameraPortStore(this).get()
-        val http = CameraHttpServer(
-            context = this,
-            port = port,
-            password = { passwords.get() },
-            hub = hub,
-            answerer = { offer -> if (webrtcOk) capture.answer(offer) else null },
-        )
-        val listening = withContext(Dispatchers.IO) { http.startSafely() }
-        if (closed.get()) {
-            runCatching { http.stop() }
-            return
-        }
-        if (!listening) {
-            fail(CameraOutcome.FAILED)
-            return
-        }
-        server = http
-        running = true
         CameraRuntime.streaming.value = true
+        CameraStreamService.lastLens = requestedLens
         val lock = getSystemService(ActivityManager::class.java)?.lockTaskModeState
-        Log.i(TAG, "streaming port=$port webrtc=$webrtcOk micService=${ListenForegroundService.running} lockTask=$lock")
+        Log.i(TAG, "streaming webrtc=$webrtcOk micService=${ListenForegroundService.running} lockTask=$lock")
         finish(CameraOutcome.STARTED)
     }
 
@@ -199,6 +197,7 @@ class CameraStreamService : Service() {
             finish(CameraOutcome.FAILED)
             return
         }
+        lastLens = if (CameraRuntime.facingFront) CameraLens.FRONT else CameraLens.BACK
         finish(if (CameraRuntime.facingFront) CameraOutcome.SWITCHED_FRONT else CameraOutcome.SWITCHED_BACK)
     }
 
@@ -240,14 +239,13 @@ class CameraStreamService : Service() {
         if (!closed.compareAndSet(false, true)) return
         running = false
         CameraRuntime.streaming.value = false
+        answerBridge = null
         val power = getSystemService(PowerManager::class.java)
         val listener = thermalListener
         if (power != null && listener != null) {
             runCatching { power.removeThermalStatusListener(listener) }
         }
         thermalListener = null
-        runCatching { server?.stop() }
-        server = null
         hub.close()
         runCatching { engine?.close() }
         engine = null
@@ -319,13 +317,36 @@ class CameraStreamService : Service() {
         private const val EXTRA_LENS = "lens"
 
         @Volatile
+        private var answerBridge: ((String) -> String?)? = null
+
+        /** Lens of the current or last stream, so a browser-triggered start resumes it. */
+        @Volatile
+        var lastLens: CameraLens = CameraLens.DEFAULT
+            private set
+
+        @Volatile
+        var onOutcome: ((CameraOrigin, CameraOutcome) -> Unit)? = null
+
+        fun webrtcAnswer(offer: String): String? = answerBridge?.invoke(offer)
+
+        @Volatile
         var running: Boolean = false
             private set
 
         private val gateLock = Any()
         private var gate: CompletableDeferred<CameraOutcome>? = null
 
-        suspend fun start(context: Context, lens: CameraLens = CameraLens.DEFAULT): CameraOutcome {
+        suspend fun start(
+            context: Context,
+            lens: CameraLens = CameraLens.DEFAULT,
+            origin: CameraOrigin = CameraOrigin.USER,
+        ): CameraOutcome {
+            val outcome = if (running) CameraOutcome.ALREADY_ON else prepareStart(context, lens)
+            onOutcome?.invoke(origin, outcome)
+            return outcome
+        }
+
+        private suspend fun prepareStart(context: Context, lens: CameraLens): CameraOutcome {
             val app = context.applicationContext
             val jarvis = app as? JarvisApplication
             if (jarvis == null || jarvis.cameraPasswords.get().isEmpty()) {
@@ -342,9 +363,10 @@ class CameraStreamService : Service() {
             return request(app, ACTION_START) { it.putExtra(EXTRA_LENS, lens.name.lowercase()) }
         }
 
-        suspend fun stop(context: Context): CameraOutcome {
-            if (!running) return CameraOutcome.ALREADY_OFF
-            return request(context.applicationContext, ACTION_STOP)
+        suspend fun stop(context: Context, origin: CameraOrigin = CameraOrigin.USER): CameraOutcome {
+            val outcome = if (!running) CameraOutcome.ALREADY_OFF else request(context.applicationContext, ACTION_STOP)
+            onOutcome?.invoke(origin, outcome)
+            return outcome
         }
 
         suspend fun switch(context: Context): CameraOutcome {
