@@ -8,17 +8,24 @@ object BackupSttPolicy {
     /** About 0.4s of 16 kHz 16-bit mono. Shorter clips are silence, not a question. */
     const val MIN_PCM_BYTES = 12_800
 
+    /** 0..100 from PcmLevel.rms16. Below this the capture is room noise, not speech. */
+    const val MIN_PCM_RMS = 3
+
 
     fun shouldTranscribe(
         recognizerText: String,
         recognizerFailed: Boolean,
         pcmBytes: Int,
         cloudNext: Boolean,
+        arabicAuto: Boolean = false,
+        pcmRms: Int = Int.MAX_VALUE,
     ): Boolean {
         if (recognizerText.isNotBlank()) return false
         if (!recognizerFailed) return false
         if (!cloudNext) return false
-        return pcmBytes >= MIN_PCM_BYTES
+        if (pcmBytes < MIN_PCM_BYTES) return false
+        if (arabicAuto && pcmRms < MIN_PCM_RMS) return false
+        return true
     }
 }
 

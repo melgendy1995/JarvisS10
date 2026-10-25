@@ -17,6 +17,7 @@ import com.jarvis.app.system.VoiceLanguageStore
 import com.jarvis.app.system.WakeLog
 import com.jarvis.app.system.WakeRuntime
 import com.jarvis.audio.JarvisSpeaker
+import com.jarvis.audio.PcmLevel
 import com.jarvis.audio.PcmMic
 import com.jarvis.audio.PcmSpeaker
 import com.jarvis.audio.PushToTalkRecognizer
@@ -246,6 +247,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         onFinal = { text, confidence ->
             heard = text
             heardConfidence = confidence
+            logHeard(text, confidence)
             if (!holding) routeHeard()
         },
         onError = { message, hard ->
@@ -530,14 +532,25 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         if (text.isEmpty()) {
             val audio = pendingPcm
             pendingPcm = ByteArray(0)
-            // Whisper is only the backup recognizer. The router still runs on its text.
-            if (BackupSttPolicy.shouldTranscribe(
-                    recognizerText = text,
-                    recognizerFailed = true,
-                    pcmBytes = audio.size,
-                    cloudNext = app.cloudBrainReachable() && app.whisper.ready(),
-                )
-            ) {
+            val setting = VoiceLanguageStore.get(getApplication())
+            val auto = setting == VoiceLanguageStore.AUTO
+            // AUTO is a Whisper safety net: no cloud brain needed beyond whisper itself,
+            // but the capture must hold real speech-level audio, not room noise.
+            val cloudNext = if (auto) {
+                app.whisper.ready()
+            } else {
+                app.cloudBrainReachable() && app.whisper.ready()
+            }
+            val run = BackupSttPolicy.shouldTranscribe(
+                recognizerText = text,
+                recognizerFailed = true,
+                pcmBytes = audio.size,
+                cloudNext = cloudNext,
+                arabicAuto = auto,
+                pcmRms = rmsInt(audio),
+            )
+            Log.i(VOICE, "stt recheck decision=${if (run) "run" else "skip"} reason=${backupReason(run, setting, audio)}")
+            if (run) {
                 routed = true
                 waitForResult?.cancel()
                 transcribe(audio)
@@ -559,19 +572,58 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         pendingPcm = ByteArray(0)
         waitForResult?.cancel()
         // Auto mode only: pinned English or Arabic needs no Whisper re-check.
-        val recheck = VoiceLanguageStore.get(getApplication()) == VoiceLanguageStore.AUTO &&
+        val setting = VoiceLanguageStore.get(getApplication())
+        val ready = app.whisper.ready()
+        val recheck = setting == VoiceLanguageStore.AUTO &&
             ArabicRecheckPolicy.shouldRecheck(
-                whisperReady = app.whisper.ready(),
+                whisperReady = ready,
                 pcmBytes = audio.size,
                 recognizerText = text,
                 matchesLocalSkill = app.matchesLocalSkill(text),
                 confidence = heardConfidence,
             )
+        Log.i(VOICE, "stt recheck decision=${if (recheck) "run" else "skip"} reason=${recheckReason(setting, ready, audio.size, text, app.matchesLocalSkill(text))}")
         if (recheck) {
             recheckTranscript(text, heardConfidence, audio)
             return
         }
         deliver(text)
+    }
+
+    /** One line per final result. Never the transcript itself. */
+    private fun logHeard(text: String, confidence: Float) {
+        val audio = pendingPcm
+        Log.i(
+            VOICE,
+            "stt heard chars=${text.length} conf=$confidence arabic=${ArabicRecheckPolicy.hasArabic(text)} " +
+                "pcm=${audio.size} pcmRms=${rmsInt(audio)} skill=${app.matchesLocalSkill(text.trim())}",
+        )
+    }
+
+    private fun rmsInt(audio: ByteArray): Int = (PcmLevel.rms16(audio) * 100f).toInt()
+
+    private fun backupReason(ran: Boolean, setting: String, audio: ByteArray): String = when {
+        ran -> "empty-text"
+        setting != VoiceLanguageStore.AUTO -> "setting=$setting"
+        audio.size < BackupSttPolicy.MIN_PCM_BYTES -> "pcm-short"
+        rmsInt(audio) < BackupSttPolicy.MIN_PCM_RMS -> "pcm-quiet"
+        else -> "cloud-unavailable"
+    }
+
+    private fun recheckReason(
+        setting: String,
+        whisperReady: Boolean,
+        pcmBytes: Int,
+        text: String,
+        matchesSkill: Boolean,
+    ): String = when {
+        setting != VoiceLanguageStore.AUTO -> "setting=$setting"
+        !whisperReady -> "whisper-not-ready"
+        pcmBytes < ArabicRecheckPolicy.MIN_PCM_BYTES -> "pcm-short"
+        ArabicRecheckPolicy.hasArabic(text) -> "arabic-text"
+        matchesSkill && (heardConfidence < 0f || heardConfidence >= ArabicRecheckPolicy.LOW_CONFIDENCE) ->
+            "confident-skill"
+        else -> "soft-transcript"
     }
 
     /**
@@ -589,6 +641,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             } catch (_: Exception) {
                 null
             }?.trim()?.ifBlank { null }
+            Log.i(VOICE, "whisper fallback result chars=${whisperText?.length ?: 0} arabic=${ArabicRecheckPolicy.hasArabic(whisperText)}")
             val chosen = ArabicRecheckPolicy.chooseText(text, whisperText)
             Log.i(
                 VOICE,
@@ -622,6 +675,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 ""
             }
             if (!isActive || gen != generation) return@launch
+            Log.i(VOICE, "whisper fallback result chars=${text.length} arabic=${ArabicRecheckPolicy.hasArabic(text.ifEmpty { null })}")
             if (text.isEmpty()) {
                 wake.emptyTranscript()
                 showIdle(sttFailure.ifBlank { "I didn't hear anything." })
@@ -1037,8 +1091,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 if (id != listenId || gen != generation || holding || text.isBlank()) return@Callbacks
                 _ui.update { it.copy(you = text) }
             },
-            onFinal = { text, _ ->
+            onFinal = { text, confidence ->
                 if (id != listenId || gen != generation || holding) return@Callbacks
+                logHeard(text, confidence)
                 val elapsed = SystemClock.elapsedRealtime() - openedAt
                 val stillOpen = followUp && text.isBlank() && !endpointer.heardSpeech &&
                     restarts < 4 && elapsed < WakeConfig.FOLLOW_UP_MS - 400
@@ -1125,7 +1180,10 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             callbacks = PushToTalkRecognizer.Callbacks(
                 onLevel = {},
                 onPartial = { text -> onBargeText(token, text, fromFinal = false) },
-                onFinal = { text, _ -> onBargeText(token, text, fromFinal = true) },
+                onFinal = { text, confidence ->
+                    logHeard(text, confidence)
+                    onBargeText(token, text, fromFinal = true)
+                },
                 onError = { _, _ -> restartBarge(token) },
                 onFallbackCapture = {
                     if (token != bargeSession || holding) return@Callbacks

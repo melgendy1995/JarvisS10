@@ -11,6 +11,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognitionService
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.util.Log
 import java.util.Locale
 
 /**
@@ -40,6 +41,11 @@ class PushToTalkRecognizer(
     private var beginning = false
     private var once = false
     private var keepAlive = false
+    /** True while the current session binds the online Google app recognizer. */
+    private var onlineSession = false
+    /** Set after the online recognizer failed, so the one retry uses the offline target. */
+    private var forcedOffline = false
+    private var onlineRetries = 0
     var holding: Boolean = false
         private set
 
@@ -61,6 +67,8 @@ class PushToTalkRecognizer(
             finished = false
             unavailable = false
             clientRetries = 0
+            onlineRetries = 0
+            forcedOffline = false
             begin()
         }
     }
@@ -79,6 +87,8 @@ class PushToTalkRecognizer(
             finished = false
             unavailable = false
             clientRetries = 0
+            onlineRetries = 0
+            forcedOffline = false
             begin()
         }
     }
@@ -156,12 +166,19 @@ class PushToTalkRecognizer(
                 beginFallback()
                 return
             }
-            val target = pickRecognitionTarget(visibleTargets(), selectedTarget())
+            val choice = chooseRecognizer(
+                voiceLanguage(),
+                Locale.getDefault().toLanguageTag(),
+                visibleTargets(),
+                selectedTarget(),
+                forceOffline = forcedOffline,
+            )
+            onlineSession = !forcedOffline && choice.target?.packageName == GOOGLE_APP_PACKAGE
             val created = runCatching {
-                if (target != null) {
+                if (choice.target != null) {
                     SpeechRecognizer.createSpeechRecognizer(
                         appContext,
-                        ComponentName(target.packageName, target.className),
+                        ComponentName(choice.target.packageName, choice.target.className),
                     )
                 } else {
                     SpeechRecognizer.createSpeechRecognizer(appContext)
@@ -179,11 +196,18 @@ class PushToTalkRecognizer(
                 destroyRecognizer()
                 return
             }
-            val started = runCatching { created.startListening(listenIntent()) }.isSuccess
+            val started = runCatching { created.startListening(listenIntent(choice)) }.isSuccess
             if (!started || recognizer !== created) {
                 destroyRecognizer()
                 beginFallback()
+                return
             }
+            Log.i(
+                LOG_TAG,
+                "stt listen target=${choice.targetName} lang=${choice.primaryTag} " +
+                    "extra=${choice.extraTags.joinToString("|")} offline=${choice.preferOffline} " +
+                    "setting=${choice.setting}",
+            )
         } finally {
             beginning = false
         }
@@ -216,18 +240,17 @@ class PushToTalkRecognizer(
         callbacks?.onError(message, hard)
     }
 
-    private fun listenIntent(): Intent {
+    private fun listenIntent(choice: RecognizerChoice): Intent {
         return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, choice.preferOffline)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, primaryLanguageTag())
-            when (voiceLanguage()) {
-                "en" -> Unit
-                "ar" -> putExtra(ADDITIONAL_LANGUAGES, arrayOf("en-US"))
-                else -> putExtra(ADDITIONAL_LANGUAGES, arrayOf("ar-SA"))
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, choice.primaryTag)
+            if (choice.extraTags.isNotEmpty()) {
+                putExtra(ADDITIONAL_LANGUAGES, choice.extraTags.toTypedArray())
             }
+            choice.preferenceTag?.let { putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, it) }
             putExtra(RecognizerIntent.EXTRA_CONFIDENCE_SCORES, true)
             if (once) {
                 putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 400L)
@@ -236,8 +259,6 @@ class PushToTalkRecognizer(
             }
         }
     }
-
-    private fun primaryLanguageTag(): String = VoiceLanguageTags.resolve(voiceLanguage(), Locale.getDefault().toLanguageTag())
 
     private fun visibleTargets(): List<RecognitionTarget> {
         val intent = Intent(RecognitionService.SERVICE_INTERFACE)
@@ -298,6 +319,17 @@ class PushToTalkRecognizer(
             if (generation != session) return
             main.post {
                 if (generation != session || finished) return@post
+                Log.i(LOG_TAG, "stt error code=$error")
+                if (onlineSession && onlineRetries < 1 && isOnlineFallback(error)) {
+                    // The online Google app recognizer failed before results. One retry
+                    // with the offline Speech Services by Google target so English still works.
+                    onlineRetries++
+                    forcedOffline = true
+                    clientRetries = 0
+                    Log.i(LOG_TAG, "stt retry offline after code=$error")
+                    begin()
+                    return@post
+                }
                 if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
                     deliverError(errorMessage(error), hard = true)
                     destroyRecognizer()
@@ -355,6 +387,8 @@ class PushToTalkRecognizer(
         SpeechRecognizer.ERROR_AUDIO -> "The microphone had an audio error."
         SpeechRecognizer.ERROR_CLIENT -> "Speech recognition is not available on this phone."
         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission is needed."
+        SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED, SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
+            "That language is not set up for speech on this phone."
         SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
             "On-device recognition is unavailable right now."
         SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "The recognizer is busy."
@@ -362,6 +396,14 @@ class PushToTalkRecognizer(
         SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> "Speech recognition is not available on this phone."
         SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> ""
         else -> if (code <= 0) "" else "I didn't catch that."
+    }
+
+    /** Network or language failures of the online recognizer, before any result. */
+    private fun isOnlineFallback(error: Int): Boolean {
+        return error == SpeechRecognizer.ERROR_NETWORK ||
+            error == SpeechRecognizer.ERROR_SERVER ||
+            error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
+            error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE
     }
 
     private fun isSoft(error: Int): Boolean {
@@ -378,6 +420,7 @@ class PushToTalkRecognizer(
 }
 
 private const val ADDITIONAL_LANGUAGES = "android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES"
+private const val LOG_TAG = "JarvisVoice"
 
 private fun Bundle?.bestHypothesis(): String {
     return this?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim().orEmpty()

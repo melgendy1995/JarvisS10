@@ -31,8 +31,9 @@ object AppControlPhrases {
         returning(text)?.let { return it + langSlot(lang) }
         volume(text, wantsPercent)?.let { return it + langSlot(lang) }
         media(text)?.let { return it + langSlot(lang) }
+        shufflePlay(text)?.let { return it + langSlot(lang) }
         playAppFirst(text)?.let { return it + langSlot(lang) }
-        play(text)?.let { return it + langSlot(lang) }
+        play(text, lang == "ar")?.let { return it + langSlot(lang) }
         open(text)?.let { return it + langSlot(lang) }
         return null
     }
@@ -123,7 +124,7 @@ object AppControlPhrases {
     /** App-named media phrase: the app token sets the target slot, null when unknown. */
     private fun mediaApp(match: MatchResult): String? = targetOf(match.groupValues[1])
 
-    private fun play(text: String): Map<String, String>? {
+    private fun play(text: String, arabic: Boolean): Map<String, String>? {
         val targeted = PLAY_ON.matchEntire(text)
         if (targeted != null) {
             val query = targeted.groupValues[1].trim()
@@ -137,8 +138,18 @@ object AppControlPhrases {
         if (query.isEmpty()) return null
         transportQuery(query)?.let { return mapOf("action" to MEDIA, "media" to it) }
         appOnlyOpen(query)?.let { return it }
-        return mapOf("action" to PLAY, "query" to query, "target" to "")
+        // Bare Arabic "شغل فيروز" belongs to YouTube Music, like "shuffle <artist>".
+        return mapOf("action" to PLAY, "query" to query, "target" to if (arabic) TARGET_YOUTUBE_MUSIC else "")
     }
+
+    private fun shufflePlay(text: String): Map<String, String>? {
+        val match = SHUFFLE_PLAY.matchEntire(text) ?: return null
+        val query = match.groupValues[1].trim()
+        if (query.isEmpty()) return null
+        return mapOf("action" to PLAY, "query" to query, "target" to TARGET_YOUTUBE_MUSIC)
+    }
+
+    private val SHUFFLE_PLAY = Regex("""^(?:please\s+)?(?:can you\s+)?shuffle\s+(?:my\s+|the\s+)?(.+)$""")
 
     /** "شغل يوتيوب ميوزك" with no song: just launch the music app. */
     private fun appOnlyOpen(name: String): Map<String, String>? = when (targetOf(name)) {

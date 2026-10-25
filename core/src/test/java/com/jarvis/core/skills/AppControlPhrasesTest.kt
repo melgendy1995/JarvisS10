@@ -72,6 +72,39 @@ class AppControlPhrasesTest {
     }
 
     @Test
+    fun shuffleArtistPlaysOnYouTubeMusic() {
+        val english = AppControlPhrases.parse("shuffle fairuz")
+        assertEquals("play", english?.get("action"))
+        assertEquals("fairuz", english?.get("query"))
+        assertEquals(AppControlPhrases.TARGET_YOUTUBE_MUSIC, english?.get("target"))
+        assertEquals("en", english?.get("lang"))
+
+        val the = AppControlPhrases.parse("shuffle the beatles")
+        assertEquals("beatles", the?.get("query"))
+        assertEquals(AppControlPhrases.TARGET_YOUTUBE_MUSIC, the?.get("target"))
+    }
+
+    @Test
+    fun bareShuffleStaysUnmatched() {
+        assertNull(AppControlPhrases.parse("shuffle"))
+        assertNull(AppControlPhrases.parse("please shuffle"))
+    }
+
+    @Test
+    fun bareArabicPlayVerbRoutesToYouTubeMusic() {
+        val play = AppControlPhrases.parse("شغل فيروز")
+        assertEquals("play", play?.get("action"))
+        assertEquals("فيروز", play?.get("query"))
+        assertEquals(AppControlPhrases.TARGET_YOUTUBE_MUSIC, play?.get("target"))
+        assertEquals("ar", play?.get("lang"))
+
+        val shadda = AppControlPhrases.parse("شغّل فيروز")
+        assertEquals("play", shadda?.get("action"))
+        assertEquals("فيروز", shadda?.get("query"))
+        assertEquals(AppControlPhrases.TARGET_YOUTUBE_MUSIC, shadda?.get("target"))
+    }
+
+    @Test
     fun arabicPlayOnYouTubeMusic() {
         val play = AppControlPhrases.parse("شغل سورة الكهف على يوتيوب ميوزك")
         assertEquals("play", play?.get("action"))

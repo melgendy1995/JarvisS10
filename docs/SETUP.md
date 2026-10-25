@@ -47,6 +47,17 @@ The worker's daily counters (1,200 chat requests, 2,000 Whisper requests) live i
 
 Whisper runs only after on-device speech recognition fails, and only when Gemini or Groq can still answer. The transcript still goes through the on-device router first.
 
+## Voice language
+
+The shelf lets you pin the voice input language: Auto, English, or Arabic.
+
+- **Auto** and **Arabic** bind the *online* Google app recognizer (`com.google.android.googlequicksearchbox`), so Arabic needs the internet. Auto keeps the phone's language as primary and offers Arabic as a second language; Arabic pins `ar-SA` with English as the second language.
+- **English** keeps the offline Speech Services by Google recognizer (`com.google.android.tts`). The offline Google speech pack on this phone is English only — Arabic speech through it comes out as English garble — so do not expect Arabic from it.
+- If the online recognizer fails (network, server, or language errors) before producing a result, Jarvis retries the same listen once with the offline recognizer so English still works offline.
+- In Auto, when the recognizer returns no text but real speech was captured (long enough, above the noise floor), Whisper transcribes the capture as a safety net, and a confusing non-Arabic transcript gets one Whisper re-check before the router runs. Arabic Whisper results win over English garble.
+- Debug only: set the language without the UI with `adb shell am broadcast -a com.jarvis.app.DEBUG_VOICE_LANG -p com.jarvis.app --es v auto|en|ar`, and replay a 16 kHz mono 16-bit wav instead of the microphone with `adb shell am broadcast -a com.jarvis.app.DEBUG_STT_FILE -p com.jarvis.app --es path arabic.wav` (the file lives in `adb push WAV /data/data/com.jarvis.app/files/`).
+- Logcat (tag `JarvisVoice`) records each listen's target, languages, and offline flag, plus the final result shape (counts, confidence, PCM stats) and Whisper fallback outcomes. Transcripts are never logged.
+
 ## Voice control of other apps
 
 "Open YouTube", "play … on YouTube", pause, and volume are documented in [APP_CONTROL.md](APP_CONTROL.md), including the accessibility switch, kiosk device-owner command, and what Android 12 allows while another app is in front.
