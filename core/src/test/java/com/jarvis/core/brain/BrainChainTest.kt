@@ -356,6 +356,38 @@ class BrainChainTest {
         assertEquals("I have paused the media.", result.text)
     }
 
+    @Test
+    fun aGuardErrorFallsBackToTheUnguardedReply() = runBlocking {
+        // A guard crash (an Error, like ART's UnsupportedFlags
+        // ExceptionInInitializerError) never breaks the answer itself.
+        val crashingRouter = CommandRouter(
+            SkillRegistry().apply {
+                register(object : Skill {
+                    private var calls = 0
+                    override val id = "exploding"
+                    override fun match(text: String): SkillCall? {
+                        calls++
+                        // First call: the plain route in reply. Second call: the
+                        // guard reroute must not let this escape.
+                        if (calls >= 2) throw AssertionError("guard blew up")
+                        return null
+                    }
+                    override fun geminiDeclaration(): Any? = null
+                    override fun groqTool(): Any? = null
+                    override suspend fun run(call: SkillCall) = SkillResult("unused")
+                })
+            },
+        )
+        val groq = fake("groq") {
+            BrainResult.Answer("groq", BrainAccent.GROQ, "The timer is now running.")
+        }
+        val lines = mutableListOf<String>()
+        val result = BrainChain(crashingRouter, listOf(groq), lines::add)
+            .reply(BrainRequest("some question")) as BrainResult.Answer
+        assertEquals("The timer is now running.", result.text)
+        assertTrue(lines.any { it.startsWith("guard error AssertionError") })
+    }
+
     private fun fake(id: String, handler: suspend (BrainRequest) -> BrainResult): FakeBrain {
         return FakeBrain(id, handler)
     }

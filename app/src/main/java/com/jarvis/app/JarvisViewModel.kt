@@ -133,11 +133,15 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         OrbSignals.level = value.coerceIn(0f, 1f)
     }
 
-    /** Wi-Fi LAN address plus the camera port for the shelf, e.g. 192.168.8.211:8088. */
+    /** Wi-Fi LAN address plus the camera port for the shelf, e.g. 192.168.8.211:8088, with the Tailscale address appended when one is up. */
     private fun refreshLan() {
         viewModelScope.launch {
-            val ip = withContext(Dispatchers.IO) { LanAddress.pick(LanAddress.currentCandidates()) }
-            val text = LanAddress.display(ip, app.cameraPort())
+            val (ip, ts) =
+                withContext(Dispatchers.IO) {
+                    LanAddress.currentCandidates()
+                        .let { LanAddress.pick(it) to LanAddress.pickTailscale(it) }
+                }
+            val text = LanAddress.display(ip, app.cameraPort(), ts)
             if (_ui.value.shelfLan != text) _ui.update { it.copy(shelfLan = text) }
         }
     }

@@ -59,8 +59,23 @@ class BrainChain(
      * Cloud brains like to confirm actions the phone never made. When a reply
      * claims one, reroute what the user said (or the closest command rebuilt
      * from the claim) so a real skill answers, else speak an honest line.
+     * Fail-safe: any guard failure (yes, [Throwable] — its rules may throw an
+     * ExceptionInInitializerError where Android regex flags are unsupported)
+     * is logged and the original answer is returned unchanged.
      */
     private suspend fun guard(request: BrainRequest, answer: BrainResult.Answer): BrainResult.Answer {
+        if (answer.toolRan) return answer
+        return try {
+            runGuard(request, answer)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (t: Throwable) {
+            log("guard error ${t.javaClass.simpleName}")
+            answer
+        }
+    }
+
+    private suspend fun runGuard(request: BrainRequest, answer: BrainResult.Answer): BrainResult.Answer {
         if (answer.toolRan) return answer
         val claim = ActionClaimGuard.detect(answer.text) ?: return answer
         val attempts = sequenceOf(request.utterance).plus(

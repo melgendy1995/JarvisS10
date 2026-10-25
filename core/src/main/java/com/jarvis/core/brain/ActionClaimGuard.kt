@@ -131,6 +131,14 @@ object ActionClaimGuard {
         return tokens.firstOrNull { fragment.contains(it) }?.let { appToken(it) }
     }
 
+    /**
+     * Android's ICU regex engine rejects the JVM "all Unicode classes" regex
+     * flag (256) while compiling, so the rules compile with only
+     * [Pattern.CASE_INSENSITIVE] and [Pattern.UNICODE_CASE], which ART
+     * supports. Exposed for the flag test.
+     */
+    internal fun flagsForTest(): Int = Pattern.CASE_INSENSITIVE or Pattern.UNICODE_CASE
+
     private class Rule(
         val type: Type,
         val arabic: Boolean,
@@ -138,8 +146,12 @@ object ActionClaimGuard {
         val onOf: (MatchResult) -> Boolean? = { null },
         val appOf: (MatchResult) -> String? = { null },
     ) {
-        // Unicode word classes so \b also acts on Arabic letters.
-        private val regex = Pattern.compile(pattern, Pattern.UNICODE_CHARACTER_CLASS)
+        // Android (ICU) regex rejects the JVM Unicode-class regex flag, and we
+        // compile with only the two supported ones, so \b is ASCII-only and the
+        // Arabic rules spell boundaries out explicitly as
+        // (?<![\p{L}\p{N}_]) / (?![\p{L}\p{N}_]) instead; those two flags
+        // behave the same on JVM and ART.
+        private val regex = Pattern.compile(pattern, flagsForTest())
 
         fun matches(text: String): Boolean = regex.matcher(text).find()
 
@@ -218,29 +230,32 @@ object ActionClaimGuard {
     )
 
     // Arabic rules, on the Utterances-normalized alphabet (ة→ه, أ→ا, ؤ→و).
+    // The JVM Unicode-class flag is unsupported on Android and \b is ASCII-only
+    // without it, so word boundaries here are explicit lookarounds on letters
+    // and digits, and Arabic-letters-only checks use the [\u0600-\u06FF] range.
     private val arabicRules = listOf(
         Rule(
             Type.MEDIA_STOP,
             arabic = true,
-            pattern = "\\bتم (?:الايقاف|الاطفاء|الاغلاق)(?!\\s*\\p{L})|\\b(?:الايقاف|الاطفاء)\\s+(?:يوتيوب ميوزك|يوتيوب|سبوتيفاي|سامسونج ميوزك)\\b|\\b(?:وقفت|اوقفت)\\b[^؟]{0,40}\\b(?:الموسيقي|التشغيل|الاغنيه|الاغاني|الفيديو|يوتيوب ميوزك|يوتيوب|يوتوب|سبوتيفاي|سامسونج ميوزك|الصوت|التطبيق|الجهاز)\\b",
+            pattern = "(?<![\\p{L}\\p{N}_])تم (?:الايقاف|الاطفاء|الاغلاق)(?!\\s*[\\u0600-\\u06FF])|(?<![\\p{L}\\p{N}_])(?:الايقاف|الاطفاء)\\s+(?:يوتيوب ميوزك|يوتيوب|سبوتيفاي|سامسونج ميوزك)(?![\\p{L}\\p{N}_])|(?<![\\p{L}\\p{N}_])(?:وقفت|اوقفت)(?![\\p{L}\\p{N}_])[^؟]{0,40}(?<![\\p{L}\\p{N}_])(?:الموسيقي|التشغيل|الاغنيه|الاغاني|الفيديو|يوتيوب ميوزك|يوتيوب|يوتوب|سبوتيفاي|سامسونج ميوزك|الصوت|التطبيق|الجهاز)(?![\\p{L}\\p{N}_])",
             appOf = { m -> appFromText(m.group()) },
         ),
         Rule(
             Type.APP_OPEN,
             arabic = true,
-            pattern = "\\b(?:فتحت|افتحت)\\s*(?:يوتيوب ميوزك|يوتيوب|سبوتيفاي|التطبيق|الكاميرا)",
+            pattern = "(?<![\\p{L}\\p{N}_])(?:فتحت|افتحت)\\s*(?:يوتيوب ميوزك|يوتيوب|سبوتيفاي|التطبيق|الكاميرا)",
             appOf = { m -> appFromText(m.group()) },
         ),
         Rule(
             Type.MEDIA_RESUME,
             arabic = true,
-            pattern = "\\bتم التشغيل(?!\\s*\\p{L})|\\b(?:شغلت|حطيت|تشغلت)\\b[^؟]{0,40}\\b(?:الموسيقي|التشغيل|الاغنيه|الاغاني|الفيديو|يوتيوب ميوزك|يوتيوب|يوتوب|سبوتيفاي|الجهاز|التطبيق|الكاميرا|الكشاف)\\b",
+            pattern = "(?<![\\p{L}\\p{N}_])تم التشغيل(?!\\s*[\\u0600-\\u06FF])|(?<![\\p{L}\\p{N}_])(?:شغلت|حطيت|تشغلت)(?![\\p{L}\\p{N}_])[^؟]{0,40}(?<![\\p{L}\\p{N}_])(?:الموسيقي|التشغيل|الاغنيه|الاغاني|الفيديو|يوتيوب ميوزك|يوتيوب|يوتوب|سبوتيفاي|الجهاز|التطبيق|الكاميرا|الكشاف)(?![\\p{L}\\p{N}_])",
             appOf = { m -> appFromText(m.group()) },
         ),
         Rule(
             Type.CAMERA,
             arabic = true,
-            pattern = "\\b(?:الكاميرا|الفلاش)\\s+(شغاله|شغالة|تعمل|يعمل|شغله|مطفيه|مطفي|مقفوله)\\b|\\b(?:شغلت|فتحت|اطفيت)\\s+(?:الكاميرا|الفلاش)\\b",
+            pattern = "(?<![\\p{L}\\p{N}_])(?:الكاميرا|الفلاش)\\s+(شغاله|شغالة|تعمل|يعمل|شغله|مطفيه|مطفي|مقفوله)(?![\\p{L}\\p{N}_])|(?<![\\p{L}\\p{N}_])(?:شغلت|فتحت|اطفيت)\\s+(?:الكاميرا|الفلاش)(?![\\p{L}\\p{N}_])",
             onOf = { m ->
                 val w = if (m.groupCount() >= 1) m.group(1) ?: "" else ""
                 when {
@@ -253,18 +268,18 @@ object ActionClaimGuard {
         Rule(
             Type.FLASHLIGHT,
             arabic = true,
-            pattern = "\\b(?:الكشاف|الفلاش)\\s+(شغال|شغاله|تعمل|يعمل|مطفي|مطفيه|مفتوح)\\b",
+            pattern = "(?<![\\p{L}\\p{N}_])(?:الكشاف|الفلاش)\\s+(شغال|شغاله|تعمل|يعمل|مطفي|مطفيه|مفتوح)(?![\\p{L}\\p{N}_])",
             onOf = { m -> !m.group(1).orEmpty().startsWith("م") },
         ),
         Rule(
             Type.TIMER,
             arabic = true,
-            pattern = "\\b(?:ضبطت الموقت|تم ضبط الموقت|الموقت (?:شغال|يعمل|تم ضبطه))\\b",
+            pattern = "(?<![\\p{L}\\p{N}_])(?:ضبطت الموقت|تم ضبط الموقت|الموقت (?:شغال|يعمل|تم ضبطه))(?![\\p{L}\\p{N}_])",
         ),
         Rule(
             Type.VOLUME,
             arabic = true,
-            pattern = "\\b(?:ضبطت|رفعت|خفضت|كتمت)\\s+الصوت\\b|\\bتم\\s+(?:رفع|خفض|كتم)\\s+الصوت\\b",
+            pattern = "(?<![\\p{L}\\p{N}_])(?:ضبطت|رفعت|خفضت|كتمت)\\s+الصوت(?![\\p{L}\\p{N}_])|(?<![\\p{L}\\p{N}_])تم\\s+(?:رفع|خفض|كتم)\\s+الصوت(?![\\p{L}\\p{N}_])",
         ),
     )
 }

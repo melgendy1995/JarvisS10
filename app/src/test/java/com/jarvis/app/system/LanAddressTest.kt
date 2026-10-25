@@ -49,4 +49,43 @@ class LanAddressTest {
         assertEquals("No Wi-Fi", LanAddress.display(null, 8088))
         assertEquals("No Wi-Fi", LanAddress.display("", 8088))
     }
+
+    @Test
+    fun picksTheFirstTailscaleAddress() {
+        assertEquals(
+            "100.91.216.7",
+            LanAddress.pickTailscale(
+                listOf(
+                    LanCandidate("192.168.8.211", wifi = true),
+                    LanCandidate("fe80::1", wifi = true),
+                    LanCandidate("100.91.216.7", wifi = false),
+                    LanCandidate("100.112.3.4", wifi = false),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun tailscalePicksRangeBoundaries() {
+        assertEquals("100.64.0.1", LanAddress.pickTailscale(listOf(LanCandidate("100.64.0.1", wifi = false))))
+        assertEquals("100.127.255.9", LanAddress.pickTailscale(listOf(LanCandidate("100.127.255.9", wifi = false))))
+    }
+
+    @Test
+    fun tailscalePicksRejectsOutsideCGNAT() {
+        assertNull(LanAddress.pickTailscale(listOf(LanCandidate("100.63.4.9", wifi = false))))
+        assertNull(LanAddress.pickTailscale(listOf(LanCandidate("100.128.4.9", wifi = false))))
+        assertNull(LanAddress.pickTailscale(listOf(LanCandidate("192.168.8.211", wifi = true))))
+        assertNull(LanAddress.pickTailscale(emptyList()))
+    }
+
+    @Test
+    fun displayAppendsTailscaleWhenPresentAndIsUnchangedOtherwise() {
+        assertEquals(
+            "192.168.8.211:8088 · TS 100.91.216.7:8088",
+            LanAddress.display("192.168.8.211", 8088, tailscale = "100.91.216.7"),
+        )
+        assertEquals("192.168.8.211:8088", LanAddress.display("192.168.8.211", 8088, tailscale = null))
+        assertEquals("192.168.8.211:8088", LanAddress.display("192.168.8.211", 8088, tailscale = ""))
+    }
 }

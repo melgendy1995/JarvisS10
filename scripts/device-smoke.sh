@@ -5,8 +5,9 @@
 #   scripts/device-smoke.sh [--serial SERIAL]
 #
 # What it does: checks the app is alive, that the shelf IP/port are reachable
-# and refuse unauthenticated requests, asks the brain questions in English and
-# Arabic through the debug broadcast, drives YouTube Music playback, toggles the
+# and refuse unauthenticated requests, runs a basic brain round-trip, asks the
+# brain questions in English and Arabic through the debug broadcast, drives
+# YouTube Music playback, toggles the
 # camera stream, and replays a generated "hey jarvis" wav into the wake
 # listener. Nothing here speaks out loud, unlocks the phone, or reads a secret
 # store.
@@ -67,7 +68,9 @@ P=0
 F=0
 S=0
 
-say()
+# "say" here must not shadow macOS /usr/bin/say (the wake wake_sim check uses
+# that binary to render the clip), so the printing helper is named "out".
+out()
 {
   printf '%s\n' "$*" | tee -a "$LOG_FILE"
 }
@@ -103,16 +106,33 @@ tag_stamp()
 # Record the device time as a logcat -T marker (logcat -c is not allowed),
 # broadcast the question to the debug receiver, then poll the buffered logcat
 # for the spoken reply line. Echoes the JarvisVoice "tts speak" lines on stdout.
+#
+# Grounded search plus the Groq fallback can take ~10-20 s, so the reply wait
+# is up to 40 s.
 ask()
 {
-  local text esc replies
+  local text esc replies ready_marker
   text=$1
-  front
+  # The app must be alive before the ask: if pidof is empty, front relaunches
+  # the activity, so wait up to 30 s for its "voice loop ready" log line.
+  if [ -z "$(adb_run shell pidof "$PKG" || true)" ]; then
+    front
+    ready_marker=$(tag_stamp)
+    for _ in $(seq 1 30); do
+      sleep 1
+      if adb_run shell "logcat -d -T '$ready_marker'" |
+        grep -F "JarvisVoice: voice loop ready" >/dev/null; then
+        break
+      fi
+    done
+  else
+    front
+  fi
   ASK_MARKER=$(tag_stamp)
   esc=$(esc_sq "$text")
   adb_run shell "am broadcast -a $ASK_ACTION -n $ASK_COMPONENT --es q '$esc'" >/dev/null || true
   replies=""
-  for _ in $(seq 1 25); do
+  for _ in $(seq 1 40); do
     sleep 1
     replies=$(adb_run shell "logcat -d -T '$ASK_MARKER'" |
       grep -F "JarvisVoice: tts speak brain=" || true)
@@ -121,6 +141,26 @@ ask()
     fi
   done
   printf '%s' "$replies"
+}
+
+# Whether a FATAL EXCEPTION for com.jarvis.app crashed the app since a
+# logcat -T marker; non-empty output means there was a crash.
+crash_since()
+{
+  adb_run shell "logcat -d -b crash -T '$1'" |
+    grep -F "FATAL EXCEPTION" | grep "$PKG" || true
+}
+
+# Human hint for a FAIL detail: was there a crash since the last ask marker?
+crash_note()
+{
+  local first
+  first=$(crash_since "$ASK_MARKER" | head -1 | cut -c1-100)
+  if [ -n "$first" ]; then
+    printf '%s' " | crashed since the ask marker: $first"
+  else
+    printf '%s' " | no FATAL EXCEPTION for com.jarvis.app in logcat -b crash since the ask marker"
+  fi
 }
 
 locked()
@@ -171,7 +211,7 @@ record()
     FAIL) F=$((F + 1)) ;;
     *) S=$((S + 1)) ;;
   esac
-  say "$1  $2  $3"
+  out "$1  $2  $3"
 }
 
 check_app_running()
@@ -239,13 +279,32 @@ reply_is_bad()
     grep -qiE "i can't|i couldn't|didn't catch|cloud brain|cooling down|isn't set up"
 }
 
+# First check: a clean, unguarded brain round-trip. PASS only when the app
+# speaks a reply AND no FATAL EXCEPTION crashed it since the ask marker
+# (the S10 regex-flag crash reproduced as exactly that).
+check_brain_basic()
+{
+  local replies text
+  replies=$(ask "Tell me a one-sentence fun fact about the moon.")
+  text=$(first_reply_text "$replies")
+  if [ -z "$text" ]; then
+    record FAIL brain_basic "no JarvisVoice reply within 40 s$(crash_note)"
+    return
+  fi
+  if [ -n "$(crash_since "$ASK_MARKER")" ]; then
+    record FAIL brain_basic "reply arrived but the app crashed: $text$(crash_note)"
+    return
+  fi
+  record PASS brain_basic "$text"
+}
+
 check_search_en()
 {
   local replies text tool
   replies=$(ask "What is today's date and the latest news headline?")
   text=$(first_reply_text "$replies")
   if [ -z "$text" ]; then
-    record FAIL search_en "no JarvisVoice reply within 25 s"
+    record FAIL search_en "no JarvisVoice reply within 40 s$(crash_note)"
     return
   fi
   if reply_is_bad "$text"; then
@@ -262,7 +321,7 @@ check_search_ar()
   replies=$(ask "ما هو تاريخ اليوم وما آخر خبر؟")
   text=$(first_reply_text "$replies")
   if [ -z "$text" ]; then
-    record FAIL search_ar "no JarvisVoice reply within 25 s"
+    record FAIL search_ar "no JarvisVoice reply within 40 s$(crash_note)"
     return
   fi
   if printf '%s' "$text" | grep -q '[؀-ۿ]'; then
@@ -425,9 +484,11 @@ check_wake_sim()
   local wav=/tmp/hey_jarvis.wav
   local aiff=/tmp/hj.aiff
   local marker trig score pid
-  if command -v say >/dev/null 2>&1 && command -v afconvert >/dev/null 2>&1; then
+  # macOS /usr/bin/say, file output only: -o renders, nothing is spoken. The
+  # bare name is not used because the old printing helper used to shadow it.
+  if [ -x /usr/bin/say ] && command -v afconvert >/dev/null 2>&1; then
     rm -f "$aiff" "$wav"
-    say -v Daniel -o "$aiff" "hey jarvis" >/dev/null 2>&1 || { record SKIP wake_sim "say could not render the clip"; return; }
+    /usr/bin/say -v Daniel -o "$aiff" "hey jarvis" >/dev/null 2>&1 || { record SKIP wake_sim "say could not render the clip"; return; }
     afconvert -f WAVE -d LEI16@16000 -c 1 "$aiff" "$wav" >/dev/null 2>&1 || { record SKIP wake_sim "afconvert failed"; return; }
   else
     record SKIP wake_sim "say/afconvert missing on this Mac"
@@ -486,10 +547,10 @@ main()
 {
   trap repin EXIT
   : > "$LOG_FILE"
-  say "Device smoke test — serial=$SERIAL start=$(date '+%F %T') adb=$ADB_BIN"
+  out "Device smoke test — serial=$SERIAL start=$(date '+%F %T') adb=$ADB_BIN"
   START_MARKER=$(tag_stamp)
   if locked; then
-    say "phone is locked — the YT Music checks will SKIP; the script never unlocks it"
+    out "phone is locked — the YT Music checks will SKIP; the script never unlocks it"
   else
     case "$(pin_state)" in
       *PINNED*)
@@ -498,13 +559,14 @@ main()
         # Music from ever coming to the front. Unpin for the media checks;
         # re-pin when the script exits.
         adb_run shell am task lock stop >/dev/null || true
-        say "kiosk pin was active, unpinned for this run (restored on exit)"
+        out "kiosk pin was active, unpinned for this run (restored on exit)"
         ;;
     esac
   fi
   check_app_running
   check_shelf_ip
   check_port_auth
+  check_brain_basic
   check_search_en
   check_search_ar
   check_ytm_en
@@ -512,8 +574,8 @@ main()
   check_nothing_playing
   check_camera_onoff
   check_wake_sim
-  say "-----"
-  say "$P pass, $F fail, $S skip"
+  out "-----"
+  out "$P pass, $F fail, $S skip"
   trap - EXIT
   repin
 }

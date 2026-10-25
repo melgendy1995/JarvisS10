@@ -1,5 +1,6 @@
 package com.jarvis.core.brain
 
+import java.util.regex.Pattern
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -187,5 +188,26 @@ class ActionClaimGuardTest {
     fun anEarnedClaimIsDetectableButTheGuardWaitsForToolRan() {
         // The reply pattern itself looks like a claim; callers skip it when toolRan is true.
         assertTrue(ActionClaimGuard.detect("The flashlight is on.")?.type == ActionClaimGuard.Type.FLASHLIGHT)
+    }
+
+    // The Galaxy S10 (ART) rejects Pattern.UNICODE_CHARACTER_CLASS (flag 256) in
+    // the initializer, crashing every brain answer. The object must compile on
+    // the JVM with only the flags Android accepts.
+    @Test
+    fun initializesWithAndroidSupportedFlags() {
+        assertEquals(0, ActionClaimGuard.flagsForTest() and 256)
+        assertEquals(Pattern.CASE_INSENSITIVE or Pattern.UNICODE_CASE, ActionClaimGuard.flagsForTest())
+    }
+
+    @Test
+    fun everyRuleCompilesAndMatchesOnAndroidSafeFlags() {
+        for ((text, expected) in listOf(
+            "تم الايقاف." to true,
+            "I have stopped the music." to true,
+            "Here is what I know." to false,
+        )) {
+            val hasClaim = ActionClaimGuard.detect(text) != null
+            assertEquals(text, expected, hasClaim)
+        }
     }
 }

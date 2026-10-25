@@ -22,9 +22,27 @@ object LanAddress {
             .maxByOrNull { it.wifi }?.ipv4
     }
 
-    /** "192.168.8.211:8088" for the shelf, or "No Wi-Fi" when nothing qualifies. */
-    fun display(ip: String?, port: Int): String {
-        return if (ip.isNullOrBlank()) "No Wi-Fi" else "$ip:$port"
+    private val TAILSCALE = Regex(
+        """^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$""",
+    )
+
+    /** First IPv4 in 100.64.0.0/10 (100.64.0.0–100.127.255.255), typically tun0. */
+    fun pickTailscale(candidates: List<LanCandidate>): String? {
+        return candidates
+            .filter { it.ipv4.isNotEmpty() && TAILSCALE.matches(it.ipv4) }
+            .firstOrNull()?.ipv4
+    }
+
+    /**
+     * Shelf text: "192.168.8.211:8088 · TS 100.91.216.7:8088" when a Tailscale
+     * address exists, or "192.168.8.211:8088" / "No Wi-Fi" unchanged otherwise.
+     */
+    fun display(ip: String?, port: Int, tailscale: String? = null): String {
+        val lan = if (ip.isNullOrBlank()) "No Wi-Fi" else "$ip:$port"
+        return tailscale
+            ?.takeIf { it.isNotBlank() }
+            ?.let { "$lan · TS $it:$port" }
+            ?: lan
     }
 
     /** Android-side scan feeding [pick]; not unit-testable, kept as thin as possible. */
